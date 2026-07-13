@@ -27,11 +27,12 @@ Tony shouts from the corner ("MAMMA MIA!", "the OTHER left!") via speech bubbles
 
 ## Design decisions
 
-- **Top-down view** (per the original sketch) instead of behind-the-player 3D: reads instantly, renders crisply as programmatic vector art, and is natively TikTok-portrait.
-- **All art is code** — canvas paths with thick ink outlines, Italian-flag palette (Tony Red `#E63946`, Basil Green `#2A9D5C`, Cheese Gold `#FFC93F`, Mozzarella Cream `#FFF6E3` on warm terracotta streets). Zero asset licensing risk, single self-contained file, sharp at any DPI.
+- **3D voxel style** (Crossy Road family): a hand-rolled WebGL renderer — zero libraries — draws box-list voxel models with per-face shading, one directional light, and warm distance fog, from a chase camera behind the scooter (FOV widens on boost, rolls on turns). All models are code: scooter + rider + pizza box, cars, cop cars with alternating light bars, striped barriers, voxel pizza slices and breadsticks, procedural buildings with inset windows and striped awnings.
+- **2D HUD overlay** on a second canvas: pizza wheel, pizza-box lives, breadstick wallet, GPS pill, route-progress bar (scooter dot → pin with turn tick marks), heat bar, and Tony's speech bubble. Crisp at any DPI.
+- **Italian-flag palette** — Tony Red `#E63946`, Basil Green `#2A9D5C`, Cheese Gold `#FFC93F`, Mozzarella Cream `#FFF6E3` over warm terracotta streets.
 - **All audio is synthesized** — WebAudio step-sequencer plays a tarantella-flavored loop (tempo rises with level); SFX are synth blips/noise bursts. No audio files.
 - **Levels are deliveries** — 20–60 second runs (hyper-casual sweet spot), death→retry is one tap, first delivery opens fail-proof (research: player must understand success within 10s).
-- **Time-of-day cycling** — day / sunset / night tint every 3 levels for visual variety in clips.
+- **Time-of-day cycling** — day / sunset / night sky, fog, and lighting every 3 levels (night adds a headlight pool) for visual variety in clips.
 
 ## Research findings baked in
 
@@ -63,4 +64,4 @@ Current build ships zero external assets. When upgrading to sprite art, the CC0 
 
 ## Tech
 
-Single self-contained HTML file (~1,900 lines): Canvas 2D, devicePixelRatio-aware, portrait-first with letterboxed wide-screen support, `localStorage` persistence (`tonys_v1`), no dependencies, no build step. Headless smoke test in the session scratchpad drives the full state machine through a stubbed DOM.
+Single self-contained HTML file (~2,300 lines): a dependency-free WebGL voxel renderer (mat4 math, one shader, box-list models baked to VBOs, fog + directional light, 3D cube particles) plus a Canvas 2D HUD overlay. devicePixelRatio-aware, portrait-first, `localStorage` persistence (`tonys_v1`), no build step, graceful message if WebGL is unavailable. Verified by a headless smoke test (stubbed DOM/GL driving the full state machine), a 90-second random-input monkey test in real Chrome, and screenshot review of every screen.

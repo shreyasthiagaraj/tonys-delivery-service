@@ -60,9 +60,9 @@ const CRUST = '#C9803A';
 const FONT = "'Arial Rounded MT Bold','Hiragino Maru Gothic ProN','Nunito','Trebuchet MS','Segoe UI',system-ui,sans-serif";
 // world palette (voxel look) + time-of-day moods
 const TIMES = [ // day / sunset / night
-  { sky: '#F6E3C2', fogN: 15, fogF: 44, amb: 0.62, light: [1.0, 0.98, 0.9] },
-  { sky: '#F2BC8E', fogN: 13, fogF: 40, amb: 0.56, light: [1.05, 0.84, 0.64] },
-  { sky: '#2E3560', fogN: 11, fogF: 36, amb: 0.42, light: [0.55, 0.6, 0.9] },
+  { sky: '#F8E7C8', fogN: 22, fogF: 68, amb: 0.7, light: [1.06, 1.02, 0.94], sun: { p: [10, 16, -58], c: [0.55, 0.45, 0.26], s: 2.6 } },
+  { sky: '#F4C093', fogN: 20, fogF: 62, amb: 0.62, light: [1.1, 0.87, 0.66], sun: { p: [-8, 9.5, -58], c: [0.65, 0.34, 0.12], s: 3.6 } },
+  { sky: '#333D72', fogN: 16, fogF: 52, amb: 0.46, light: [0.6, 0.65, 0.95], sun: { p: [-14, 22, -58], c: [0.3, 0.34, 0.48], s: 2.1 } },
 ];
 
 // ---------- save ----------
@@ -230,6 +230,21 @@ function voxModel(boxes) {
         verts.push(p[0], p[1], p[2], face.n[0], face.n[1], face.n[2], col[0] * face.f, col[1] * face.f, col[2] * face.f);
       }
     }
+  }
+  if (!gl) return { count: 0 };
+  const vbo = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(verts), gl.STATIC_DRAW);
+  return { vbo, count: verts.length / 9 };
+}
+function discModel() { // radial gradient disc: bright center -> black rim (invisible under additive blend)
+  const verts = [];
+  const N = 16;
+  for (let i = 0; i < N; i++) {
+    const a0 = i / N * TAU, a1 = (i + 1) / N * TAU;
+    verts.push(0, 0, 0, 0, 0, 1, 1, 1, 1);
+    verts.push(Math.cos(a0) * 0.5, Math.sin(a0) * 0.5, 0, 0, 0, 1, 0, 0, 0);
+    verts.push(Math.cos(a1) * 0.5, Math.sin(a1) * 0.5, 0, 0, 0, 1, 0, 0, 0);
   }
   if (!gl) return { count: 0 };
   const vbo = gl.createBuffer();
@@ -444,7 +459,7 @@ function buildModels() {
     [0, 1.44, -0.22, 0.36, 0.06, 0.14, '#22314A'],
   ]);
   MOD.beam = voxModel([[0, 0, 0, 6.6, 0.05, 0.14, '#7AC8FF']]);
-  MOD.shadow = voxModel([[0, 0, 0, 1, 0.024, 1, '#585C6B']]);
+  MOD.shadow = voxModel([[0, 0, 0, 1, 0.024, 1, '#3A3E4E']]);
   MOD.walkShadow = voxModel([[0, 0, 0, 1, 0.024, 1, '#B99F79']]);
   MOD.cube = voxModel([[0, 0, 0, 1, 1, 1, '#FFFFFF']]);
   MOD.pin = voxModel([
@@ -466,6 +481,19 @@ function buildModels() {
     [0, 0.02, -3.6, 1.1, 0.03, 2.4, '#7E7B69'],
     [0, 0.02, -6.0, 1.5, 0.03, 2.4, '#6E6C5F'],
   ]);
+  // horizon: ground plane + hazy skyline (camera never moves in z, so these are a free skybox)
+  MOD.farground = voxModel([[0, -0.55, 0, 150, 1, 90, '#D8BC94']]);
+  const cityB = [];
+  const cityCols = ['#C9AE8C', '#B99B78', '#D4B896', '#A98F72', '#C4A584'];
+  for (let i = 0; i < 12; i++) {
+    const hx = hash(i * 17 + 5), hh = hash(i * 31 + 9);
+    const bw2 = 5 + hx * 5, bh2 = 4 + hh * 11;
+    const bx2 = -52 + i * 9.2 + (hx - 0.5) * 4;
+    cityB.push([bx2, bh2 / 2, (hh - 0.5) * 6, bw2, bh2, 6, cityCols[i % cityCols.length]]);
+    if (hh > 0.6) cityB.push([bx2, bh2 + 0.8, (hh - 0.5) * 6, bw2 * 0.4, 1.6, 3, cityCols[(i + 2) % cityCols.length]]);
+  }
+  MOD.farcity = voxModel(cityB);
+  MOD.disc = discModel();
 }
 function carModel(colr) {
   if (!carModels[colr]) carModels[colr] = buildCar(colr);
@@ -519,7 +547,19 @@ function renderWorld(o) {
   const eye = [pw * 0.45 + jx + worldRot * 1.4, 5.6 + jy, 7.4];
   const cen = [pw * 0.72 + worldRot * 3.2, 0.45 + jy * 0.5, -10];
   const up = [Math.sin(-worldRot * 0.5), Math.cos(worldRot * 0.5), 0];
-  const proj = mPersp(fovCur * Math.PI / 180, glc.width / Math.max(1, glc.height), 0.5, 70);
+  let fovKick = 0;
+  if (o.swing) { // smooth cornering: orbit the camera around the player through the turn
+    const p = clamp(o.swing.t / o.swing.dur, 0, 1);
+    const yaw = o.swing.dir * 0.85 * Math.sin(Math.PI * p);
+    const cy2 = Math.cos(yaw), sy2 = Math.sin(yaw);
+    for (const v of [eye, cen]) {
+      const dx = v[0] - pw, dz2 = v[2];
+      v[0] = pw + dx * cy2 - dz2 * sy2;
+      v[2] = dz2 * cy2 + dx * sy2;
+    }
+    fovKick = 5 * Math.sin(Math.PI * p);
+  }
+  const proj = mPersp((fovCur + fovKick) * Math.PI / 180, glc.width / Math.max(1, glc.height), 0.5, 70);
   lastVP = mMul(proj, mLookAt(eye, cen, up));
   // globals
   const ll = Math.hypot(0.45, 0.85, 0.3);
@@ -533,9 +573,12 @@ function renderWorld(o) {
   const turns = o.turns || [];
   const SEG_PX = SEG_LEN * PXU; // 192
   const nearTurnPx = p2 => turns.some(tn => Math.abs(tn.m * M2PX - p2) < 280);
+  // horizon backdrop first (static: the camera never moves in z)
+  drawModel(MOD.farground, 0, 0, -58);
+  drawModel(MOD.farcity, 0, 0, -62);
   // road segments + roadside plots
   const k0 = Math.floor((traveled - 320) / SEG_PX);
-  for (let k = k0; k < k0 + 14; k++) {
+  for (let k = k0; k < k0 + 21; k++) {
     const segpx = k * SEG_PX + SEG_PX / 2;
     const z = -(segpx - traveled) / PXU;
     if (!nearTurnPx(segpx)) drawModel(MOD.seg, 0, 0, z);
@@ -552,11 +595,10 @@ function renderWorld(o) {
     if (dz < -400 || dz > 2400) continue;
     const z = -dz / PXU;
     drawModel(MOD.xseg, 0, 0, z);
-    if (tn.state === 'pending' || tn.state === 'done') {
-      const act = tn.state === 'pending';
+    if (tn.state === 'pending') {
       for (let k = 0; k < 3; k++) {
-        const bob = act ? Math.abs(Math.sin(t * 4 - k * 0.9)) * 0.14 : 0;
-        drawModel(MOD.chev, (k - 1) * 1.15 * tn.dir, bob, z, { ry: tn.dir < 0 ? Math.PI : 0, tint: act ? WHITE_TINT : [0.55, 0.55, 0.55] });
+        const bob = Math.abs(Math.sin(t * 4 - k * 0.9)) * 0.14;
+        drawModel(MOD.chev, (k - 1) * 1.15 * tn.dir, bob, z, { ry: tn.dir < 0 ? Math.PI : 0 });
       }
     }
   }
@@ -570,7 +612,7 @@ function renderWorld(o) {
   // entities
   for (const e of (o.entities || [])) {
     const dz = e.y - traveled;
-    if (dz < -280 || dz > 2300) continue;
+    if (dz < -280 || dz > 3500) continue;
     const x = e.x / PXU, z = -dz / PXU;
     if (e.type === 'car') {
       drawModel(MOD.shadow, x + 0.06, 0.03, z + 0.06, { s: [1.75, 1, 2.95] });
@@ -586,10 +628,10 @@ function renderWorld(o) {
       drawModel(MOD.pothole, x, 0, z);
     } else if (e.type === 'slice') {
       drawModel(MOD.shadow, x, 0.03, z, { s: [0.7, 1, 0.7] });
-      drawModel(MOD.slice, x, 0.55 + Math.sin(t * 4 + e.y * 0.02) * 0.12, z, { ry: t * 2.4 + e.y * 0.01 });
+      drawModel(MOD.slice, x, 0.55 + Math.sin(t * 4 + e.y * 0.02) * 0.12, z, { ry: t * 2.4 + e.y * 0.01, tint: [1.18, 1.12, 1.0] });
     } else if (e.type === 'stick') {
       drawModel(MOD.shadow, x, 0.03, z, { s: [0.5, 1, 0.5] });
-      drawModel(MOD.stick, x, 0.55 + Math.sin(t * 4 + e.y * 0.02) * 0.12, z, { ry: t * 2.4, rz: 0.25 });
+      drawModel(MOD.stick, x, 0.55 + Math.sin(t * 4 + e.y * 0.02) * 0.12, z, { ry: t * 2.4, rz: 0.25, tint: [1.2, 1.12, 0.98] });
     } else if (e.type === 'trap') {
       if (Math.floor(t * 4) % 2 === 0) drawModel(MOD.beam, 0, 0.55, z);
       drawModel(MOD.cone, -3.05, 0.16, z);
@@ -616,6 +658,45 @@ function renderWorld(o) {
   for (const p of parts3) {
     drawModel(MOD.cube, p.x, p.y, p.z, { s: p.s, ry: p.ry, tint: p.tint });
   }
+  // ---- glow pass: additive gradient discs on pickups, chevrons, sun ----
+  gl.depthMask(false);
+  gl.disable(gl.CULL_FACE);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.ONE, gl.ONE);
+  gl.uniform1f(loc.uAmb, 1);
+  gl.uniform3f(loc.uLightCol, 1, 1, 1);
+  gl.uniform2f(loc.uFog, 9999, 10000); // fog would lift the black disc rims to sky color
+  const CAMTILT = -0.29; // face the chase camera
+  const glow = (x, y, z, s, tint) => drawModel(MOD.disc, x, y, z, { s, tint, rx: CAMTILT });
+  const sun = tod.sun;
+  glow(sun.p[0], sun.p[1], sun.p[2], sun.s * 1.6, sun.c);
+  glow(sun.p[0], sun.p[1], sun.p[2], sun.s * 4.6, [sun.c[0] * 0.35, sun.c[1] * 0.35, sun.c[2] * 0.35]);
+  for (const e of (o.entities || [])) {
+    const dz = e.y - traveled;
+    if (dz < -280 || dz > 3500) continue;
+    if (e.type !== 'slice' && e.type !== 'stick') continue;
+    const x = e.x / PXU, z = -dz / PXU;
+    const yb = 0.95 + Math.sin(t * 4 + e.y * 0.02) * 0.12;
+    const pulse = (0.8 + Math.sin(t * 6 + e.y * 0.03) * 0.2) * clamp(dz / 380, 0.12, 1);
+    if (e.type === 'slice') {
+      glow(x, yb, z, 2.4, [0.5 * pulse, 0.38 * pulse, 0.1 * pulse]);
+    } else {
+      glow(x, yb - 0.25, z, 2.2, [0.5 * pulse, 0.36 * pulse, 0.13 * pulse]);
+    }
+  }
+  for (const tn of turns) {
+    if (tn.state !== 'pending') continue;
+    const dz = tn.m * M2PX - traveled;
+    if (dz < -400 || dz > 3000) continue;
+    const z = -dz / PXU;
+    for (let k = 0; k < 3; k++) {
+      const b = (0.4 + Math.abs(Math.sin(t * 4 - k * 0.9)) * 0.6) * clamp(dz / 380, 0.15, 1);
+      glow((k - 1) * 1.15 * tn.dir, 0.3, z, 2.0, [0.32 * b, 0.25 * b, 0.04 * b]);
+    }
+  }
+  gl.disable(gl.BLEND);
+  gl.enable(gl.CULL_FACE);
+  gl.depthMask(true);
 }
 // ---------- audio ----------
 let actx = null, master = null, musicTimer = null, musicT = 0, musicStep = 0, lastSay = -9999;
@@ -830,7 +911,7 @@ function primaryAction() {
 let state = 'title', stateT = 0;
 let run = null, player = null;
 let entities = [], parts = [], pops = [];
-let shake = 0, flashW = 0, flashR = 0, worldRot = 0;
+let shake = 0, flashW = 0, flashR = 0, worldRot = 0, turnSwing = null;
 let tTitle = 0, tGlobal = 0, shopShake = null;
 function setState(s) { state = s; stateT = 0; }
 
@@ -876,7 +957,7 @@ function startRun(lvl) {
   pendingOrder = null;
   player = { lane: 1, x: laneX(1), tlane: 1, boxes: 3, inv: 0, tilt: 0, slices: 0, combo: 0, comboT: 0, speedMul: 1, stumble: 0 };
   entities = []; parts = []; pops = []; parts3 = [];
-  shake = 0; flashW = 0; flashR = 0; worldRot = 0;
+  shake = 0; flashW = 0; flashR = 0; worldRot = 0; turnSwing = null;
   boostTouch = false; boostKey = false;
   setState('play');
   tony('start');
@@ -1004,8 +1085,9 @@ function onSwipe(dir) {
 function doTurn(tn) {
   tn.state = 'done';
   sfx.turn();
-  worldRot = tn.dir * 0.5;
-  flashW = 0.25;
+  turnSwing = { t: 0, dur: 0.85, dir: tn.dir };
+  worldRot = tn.dir * 0.2;
+  flashW = 0.12;
   run.score += 100;
   run.heatBonus += 1.5;
   pop(cx, H * 0.3, 'PERFECT TURN! +100', GOLD, 1.25);
@@ -1138,8 +1220,8 @@ function updatePlay(dt) {
   }
   if (remM <= 0 && !run.over) { finishRun(); return; }
 
-  // spawning
-  while (run.nextSpawn < run.traveled + 2100) {
+  // spawning (out past the fog line so nothing pops in)
+  while (run.nextSpawn < run.traveled + 3400) {
     const y = run.nextSpawn;
     const remAtY = run.distM - y / M2PX;
     if (remAtY < 55) { run.nextSpawn += 240; continue; }
@@ -1162,7 +1244,7 @@ function updatePlay(dt) {
     }
     const dz = e.y - run.traveled; // >0 = ahead of the player
     if (dz < -300) { entities.splice(i, 1); continue; }
-    if (dz > 2300) continue;
+    if (dz > 3500) continue;
 
     if (e.type === 'slice' || e.type === 'stick') {
       if (Math.abs(dz) < 52 && Math.abs(e.x - player.x) < 62) {
@@ -1234,6 +1316,7 @@ function updateFx(dt) {
   flashW = Math.max(0, flashW - dt * 1.6);
   flashR = Math.max(0, flashR - dt * 1.4);
   worldRot *= Math.exp(-dt * 3.4);
+  if (turnSwing) { turnSwing.t += dt; if (turnSwing.t >= turnSwing.dur) turnSwing = null; }
   if (bubble) { bubble.t += dt; if (bubble.t > bubble.dur) bubble = null; }
   for (let i = pops.length - 1; i >= 0; i--) {
     const p = pops[i];
@@ -1908,7 +1991,7 @@ function renderScene(t) {
   } else {
     renderWorld({
       traveled: run.traveled, px: player.x, t, lvl: run.lvl,
-      entities, turns: run.turns, run,
+      entities, turns: run.turns, run, swing: turnSwing,
       boost: isBoost() && !run.over,
       player: {
         xw: player.x / PXU, skin: curSkin(), tilt: player.tilt,

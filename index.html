@@ -59,10 +59,10 @@ const GOLD = '#FFC93F';
 const CRUST = '#C9803A';
 const FONT = "'Arial Rounded MT Bold','Hiragino Maru Gothic ProN','Nunito','Trebuchet MS','Segoe UI',system-ui,sans-serif";
 // world palette (voxel look) + time-of-day moods
-const TIMES = [ // day / sunset / night
-  { sky: '#F8E7C8', fogN: 22, fogF: 68, amb: 0.7, light: [1.06, 1.02, 0.94], sun: { p: [10, 16, -58], c: [0.55, 0.45, 0.26], s: 2.6 } },
-  { sky: '#F4C093', fogN: 20, fogF: 62, amb: 0.62, light: [1.1, 0.87, 0.66], sun: { p: [-8, 9.5, -58], c: [0.65, 0.34, 0.12], s: 3.6 } },
-  { sky: '#333D72', fogN: 16, fogF: 52, amb: 0.46, light: [0.6, 0.65, 0.95], sun: { p: [-14, 22, -58], c: [0.3, 0.34, 0.48], s: 2.1 } },
+const TIMES = [ // day / sunset / night — day is bright NEUTRAL light, no color cast
+  { sky: '#C9E3EC', fogN: 42, fogF: 120, amb: 0.76, light: [1.06, 1.05, 1.01], sun: { p: [17, 27, -96], c: [0.5, 0.44, 0.3], s: 4.2 } },
+  { sky: '#F2CBA4', fogN: 36, fogF: 105, amb: 0.68, light: [1.1, 0.96, 0.8], sun: { p: [-14, 16, -96], c: [0.65, 0.36, 0.14], s: 6.0 } },
+  { sky: '#39437E', fogN: 28, fogF: 88, amb: 0.5, light: [0.62, 0.67, 0.97], sun: { p: [-23, 36, -96], c: [0.3, 0.34, 0.48], s: 3.5 } },
 ];
 
 // ---------- save ----------
@@ -267,7 +267,7 @@ function drawModel(m, x, y, z, o) {
   gl.drawArrays(gl.TRIANGLES, 0, m.count);
 }
 // ---------- voxel models ----------
-const P_ROAD = '#6E7284', P_DASH = '#F4EDE0', P_CURB = '#C9B18C', P_WALK = '#E3CBA2', P_DARK = '#26262B';
+const P_ROAD = '#4A5063', P_DASH = '#FFFFFF', P_CURB = '#3FA45C', P_WALK = '#DAD6C8', P_SAND = '#E8A75F', P_DARK = '#26262B';
 const CARCOLS = ['#5B8FB9', '#C97BA7', '#7FB069', '#E0A458', '#8D86C9', '#B56357', '#6D9DC5', '#F2B722'];
 const MOD = {};
 const carModels = {}, scooterModels = {};
@@ -275,12 +275,14 @@ const SEG_LEN = 4; // world units per road segment (= 192 track px)
 function buildRoadSeg() {
   const b = [
     [0, -0.06, 0, 7.0, 0.12, SEG_LEN, P_ROAD],          // asphalt
-    [-3.62, 0.1, 0, 0.4, 0.32, SEG_LEN, P_CURB],        // curbs
+    [-3.62, 0.1, 0, 0.4, 0.32, SEG_LEN, P_CURB],        // green curbs (reference style)
     [3.62, 0.1, 0, 0.4, 0.32, SEG_LEN, P_CURB],
-    [-5.15, 0.02, 0, 2.7, 0.16, SEG_LEN, P_WALK],       // sidewalks
+    [-5.15, 0.02, 0, 2.7, 0.16, SEG_LEN, P_WALK],       // stone sidewalks
     [5.15, 0.02, 0, 2.7, 0.16, SEG_LEN, P_WALK],
-    [-3.28, 0.015, 0, 0.09, 0.03, SEG_LEN, '#B9B39F'],  // edge lines
-    [3.28, 0.015, 0, 0.09, 0.03, SEG_LEN, '#B9B39F'],
+    [-10.4, -0.02, 0, 8.2, 0.1, SEG_LEN, P_SAND],       // sand beyond the sidewalks
+    [10.4, -0.02, 0, 8.2, 0.1, SEG_LEN, P_SAND],
+    [-3.28, 0.015, 0, 0.09, 0.03, SEG_LEN, '#EDEDE6'],  // edge lines
+    [3.28, 0.015, 0, 0.09, 0.03, SEG_LEN, '#EDEDE6'],
   ];
   for (const lx of [-1.104, 1.104]) for (const dz of [-1, 1]) b.push([lx, 0.02, dz, 0.12, 0.04, 0.95, P_DASH]);
   return voxModel(b);
@@ -298,6 +300,8 @@ function buildXSeg() { // intersection: covers the whole segment gap, no holes
   for (const sx of [-3.62, 3.62]) for (const sz of [-4.55, 4.55]) {
     b.push([sx, 0.1, sz, 0.4, 0.32, 3.3, P_CURB]);    // corner curbs
   }
+  b.push([-17.2, -0.02, 0, 8.4, 0.1, 12.4, P_SAND]);  // sand past the cross street
+  b.push([17.2, -0.02, 0, 8.4, 0.1, 12.4, P_SAND]);
   for (let i = 0; i < 8; i++) {
     const x = -3.06 + i * 0.88;
     b.push([x, 0.02, -2.35, 0.5, 0.035, 0.8, P_DASH]);
@@ -315,8 +319,9 @@ function buildChevron() { // ">" pointing +x, lying on the road
 function buildPlot(seed) { // one 4u-deep roadside plot: building / plaza / cafe
   const h1 = hash(seed * 7 + 3), h2 = hash(seed * 13 + 5), h3 = hash(seed * 29 + 11);
   const b = [];
+  b.push([0, -0.03, 0, 8, 0.1, SEG_LEN, P_SAND]); // ground under every plot
   if (h1 < 0.62) { // building
-    const cols = ['#EAD9B0', '#D9926B', '#A8B07C', '#DFB4A5', '#CBB794', '#B98A74'];
+    const cols = ['#F2E3C4', '#E29A70', '#BFCB8F', '#F0C6B4', '#E4D2AC', '#CE9B82'];
     const colr = cols[Math.floor(h2 * cols.length)];
     const bh = 2.6 + h3 * 3.6, bw = 3.4 + h2 * 1.4;
     b.push([0, bh / 2, 0, bw, bh, 3.7, colr]);
@@ -338,12 +343,13 @@ function buildPlot(seed) { // one 4u-deep roadside plot: building / plaza / cafe
       b.push([-bw / 2 - 0.35, 1.55, -1.3 + k * 0.62, 0.75, 0.12, 0.62, k % 2 ? CREAM : ac]);
       b.push([bw / 2 + 0.35, 1.55, -1.3 + k * 0.62, 0.75, 0.12, 0.62, k % 2 ? CREAM : ac]);
     }
-  } else if (h1 < 0.82) { // little piazza: trees
+  } else if (h1 < 0.82) { // little piazza: bright palms
     for (const tz of [-1.1, 1.0]) {
       const tx = (hash(seed * 3 + tz) - 0.5) * 1.6;
-      b.push([tx, 0.5, tz, 0.24, 1.0, 0.24, '#7A4A2E']);
-      b.push([tx, 1.25, tz, 1.0, 0.9, 1.0, '#3E8E5A']);
-      b.push([tx, 1.85, tz, 0.65, 0.5, 0.65, '#4DA76C']);
+      b.push([tx, 0.15, tz, 1.1, 0.3, 1.1, '#CFCBBB']);
+      b.push([tx, 0.85, tz, 0.26, 1.5, 0.26, '#9A6A3E']);
+      b.push([tx, 1.75, tz, 1.15, 0.55, 1.15, '#48B368']);
+      b.push([tx, 2.2, tz, 0.7, 0.45, 0.7, '#5BC97B']);
     }
   } else { // cafe terrace
     b.push([0, 0.42, -0.6, 0.9, 0.08, 0.9, '#FDFBF4']);
@@ -482,15 +488,15 @@ function buildModels() {
     [0, 0.02, -6.0, 1.5, 0.03, 2.4, '#6E6C5F'],
   ]);
   // horizon: ground plane + hazy skyline (camera never moves in z, so these are a free skybox)
-  MOD.farground = voxModel([[0, -0.55, 0, 150, 1, 90, '#D8BC94']]);
+  MOD.farground = voxModel([[0, -0.55, 0, 280, 1, 170, '#E3A55E']]);
   const cityB = [];
   const cityCols = ['#C9AE8C', '#B99B78', '#D4B896', '#A98F72', '#C4A584'];
-  for (let i = 0; i < 12; i++) {
+  for (let i = 0; i < 13; i++) {
     const hx = hash(i * 17 + 5), hh = hash(i * 31 + 9);
-    const bw2 = 5 + hx * 5, bh2 = 4 + hh * 11;
-    const bx2 = -52 + i * 9.2 + (hx - 0.5) * 4;
-    cityB.push([bx2, bh2 / 2, (hh - 0.5) * 6, bw2, bh2, 6, cityCols[i % cityCols.length]]);
-    if (hh > 0.6) cityB.push([bx2, bh2 + 0.8, (hh - 0.5) * 6, bw2 * 0.4, 1.6, 3, cityCols[(i + 2) % cityCols.length]]);
+    const bw2 = 8 + hx * 8, bh2 = 6 + hh * 19;
+    const bx2 = -84 + i * 14.2 + (hx - 0.5) * 6;
+    cityB.push([bx2, bh2 / 2, (hh - 0.5) * 10, bw2, bh2, 10, cityCols[i % cityCols.length]]);
+    if (hh > 0.6) cityB.push([bx2, bh2 + 1.3, (hh - 0.5) * 10, bw2 * 0.4, 2.6, 5, cityCols[(i + 2) % cityCols.length]]);
   }
   MOD.farcity = voxModel(cityB);
   MOD.disc = discModel();
@@ -529,6 +535,37 @@ function updateParts3(dt) {
   }
 }
 
+// ---------- route bend: the track really turns 90° at the active corner ----------
+// Fixed frame: corner at origin, incoming street runs along -z. Objects are placed on
+// the L-shaped path, then everything is rotated by the player's heading so the player
+// always sits at the origin facing -z: the world rotates around you through the turn.
+function makePlace(corner, traveled) {
+  if (!corner) {
+    const f = (sPx, xl) => ({ x: xl / PXU, z: -(sPx - traveled) / PXU, yaw: 0 });
+    f.h = 0; f.active = false;
+    return f;
+  }
+  const S = corner.S, dir = corner.dir;
+  const p = corner.taken ? clamp((traveled - (S - 140)) / 320, 0, 1) : 0;
+  const h = dir * (Math.PI / 2) * (p * p * (3 - 2 * p));
+  const ca = Math.cos(h), sa = Math.sin(h);
+  // mode 0: the route (bends at the corner). 1: straight-ahead filler past the corner.
+  // 2: the wrong arm of the cross street. Fillers make the junction a real 4-way.
+  const bp = (sOff, xl, mode) => {
+    if (mode === 1 || sOff <= 0) return [xl, -sOff, 0];
+    if (mode === 2) return [-dir * sOff, -dir * xl, dir * Math.PI / 2];
+    return [dir * sOff, dir * xl, -dir * Math.PI / 2];
+  };
+  const pl = bp(traveled - S, 0, 0);
+  const f = (sPx, xl, mode) => {
+    const ob = bp(sPx - S, xl, mode || 0);
+    const rx = ob[0] - pl[0], rz = ob[1] - pl[1];
+    return { x: (rx * ca + rz * sa) / PXU, z: (-rx * sa + rz * ca) / PXU, yaw: ob[2] + h };
+  };
+  f.h = h; f.active = true; f.S = S; f.dir = dir;
+  return f;
+}
+
 // ---------- world renderer ----------
 let fovCur = 57, glOK = false;
 function renderWorld(o) {
@@ -538,28 +575,20 @@ function renderWorld(o) {
   const sky = col3(tod.sky);
   gl.clearColor(sky[0], sky[1], sky[2], 1);
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-  // camera
-  const pw = o.px / PXU;
+  // route transform (the road really bends at the active corner)
+  const place = makePlace(o.corner || null, o.traveled);
+  const pp0 = place(o.traveled, o.px); // player's rendered position
+  // camera — chases the player, who is always at the origin of the bent frame
+  const pw = pp0.x;
   const fovTarget = 57 + (o.boost ? 7 : 0);
   fovCur = lerp(fovCur, fovTarget, 0.1);
+  const fovKick = place.active ? 6 * Math.sin(Math.abs(place.h) / (Math.PI / 2) * Math.PI) : 0;
   const jx = shake > 0 ? rnd(-shake, shake) / 90 : 0;
   const jy = shake > 0 ? rnd(-shake, shake) / 110 : 0;
   const eye = [pw * 0.45 + jx + worldRot * 1.4, 5.6 + jy, 7.4];
   const cen = [pw * 0.72 + worldRot * 3.2, 0.45 + jy * 0.5, -10];
   const up = [Math.sin(-worldRot * 0.5), Math.cos(worldRot * 0.5), 0];
-  let fovKick = 0;
-  if (o.swing) { // smooth cornering: orbit the camera around the player through the turn
-    const p = clamp(o.swing.t / o.swing.dur, 0, 1);
-    const yaw = o.swing.dir * 0.85 * Math.sin(Math.PI * p);
-    const cy2 = Math.cos(yaw), sy2 = Math.sin(yaw);
-    for (const v of [eye, cen]) {
-      const dx = v[0] - pw, dz2 = v[2];
-      v[0] = pw + dx * cy2 - dz2 * sy2;
-      v[2] = dz2 * cy2 + dx * sy2;
-    }
-    fovKick = 5 * Math.sin(Math.PI * p);
-  }
-  const proj = mPersp((fovCur + fovKick) * Math.PI / 180, glc.width / Math.max(1, glc.height), 0.5, 70);
+  const proj = mPersp((fovCur + fovKick) * Math.PI / 180, glc.width / Math.max(1, glc.height), 0.5, 140);
   lastVP = mMul(proj, mLookAt(eye, cen, up));
   // globals
   const ll = Math.hypot(0.45, 0.85, 0.3);
@@ -573,59 +602,79 @@ function renderWorld(o) {
   const turns = o.turns || [];
   const SEG_PX = SEG_LEN * PXU; // 192
   const nearTurnPx = p2 => turns.some(tn => Math.abs(tn.m * M2PX - p2) < 280);
-  // horizon backdrop first (static: the camera never moves in z)
-  drawModel(MOD.farground, 0, 0, -58);
-  drawModel(MOD.farcity, 0, 0, -62);
+  // horizon backdrop — swings with the player's heading through turns
+  {
+    const hh = place.h, ca2 = Math.cos(hh), sa2 = Math.sin(hh);
+    drawModel(MOD.farground, -108 * sa2, 0, -108 * ca2, { ry: hh });
+    drawModel(MOD.farcity, -100 * sa2, 0, -100 * ca2, { ry: hh });
+  }
   // road segments + roadside plots
   const k0 = Math.floor((traveled - 320) / SEG_PX);
-  for (let k = k0; k < k0 + 21; k++) {
+  for (let k = k0; k < k0 + 31; k++) {
     const segpx = k * SEG_PX + SEG_PX / 2;
-    const z = -(segpx - traveled) / PXU;
-    if (!nearTurnPx(segpx)) drawModel(MOD.seg, 0, 0, z);
-    if (!nearTurnPx(segpx)) {
-      for (let side = 0; side < 2; side++) {
-        const v = Math.floor(hash(k * 2 + side + 7) * MOD.plots.length);
-        drawModel(MOD.plots[v], side ? 8.4 : -8.4, 0, z);
+    if (nearTurnPx(segpx)) continue;
+    const pp = place(segpx, 0);
+    drawModel(MOD.seg, pp.x, 0, pp.z, { ry: pp.yaw });
+    for (let side = 0; side < 2; side++) {
+      const v = Math.floor(hash(k * 2 + side + 7) * MOD.plots.length);
+      const pq = place(segpx, side ? 403 : -403);
+      drawModel(MOD.plots[v], pq.x, 0, pq.z, { ry: pq.yaw });
+    }
+  }
+  // 4-way fillers at the active corner: the straight-ahead street + the wrong arm
+  if (place.active) {
+    for (let j = 0; j < 8; j++) {
+      const sF = place.S + 330 + j * SEG_PX + SEG_PX / 2;
+      for (const mode of [1, 2]) {
+        const pp = place(sF, 0, mode);
+        drawModel(MOD.seg, pp.x, 0, pp.z, { ry: pp.yaw });
+        for (let side = 0; side < 2; side++) {
+          const v = Math.floor(hash(j * 5 + side * 3 + mode * 11) * MOD.plots.length);
+          const pq = place(sF, side ? 403 : -403, mode);
+          drawModel(MOD.plots[v], pq.x, 0, pq.z, { ry: pq.yaw });
+        }
       }
     }
   }
   // intersections + chevrons
   for (const tn of turns) {
     const dz = tn.m * M2PX - traveled;
-    if (dz < -400 || dz > 2400) continue;
-    const z = -dz / PXU;
-    drawModel(MOD.xseg, 0, 0, z);
+    if (dz < -400 || dz > 5300) continue;
+    const px2 = place(tn.m * M2PX, 0);
+    drawModel(MOD.xseg, px2.x, 0, px2.z, { ry: px2.yaw });
     if (tn.state === 'pending') {
       for (let k = 0; k < 3; k++) {
         const bob = Math.abs(Math.sin(t * 4 - k * 0.9)) * 0.14;
-        drawModel(MOD.chev, (k - 1) * 1.15 * tn.dir, bob, z, { ry: tn.dir < 0 ? Math.PI : 0 });
+        const pc = place(tn.m * M2PX, (k - 1) * 55 * tn.dir);
+        drawModel(MOD.chev, pc.x, bob, pc.z, { ry: (tn.dir < 0 ? Math.PI : 0) + pc.yaw });
       }
     }
   }
   // destination
   if (o.run && (o.run.arriving || o.run.over)) {
-    const dz = o.run.distM * M2PX - traveled;
-    const z = -dz / PXU;
-    drawModel(MOD.door, 4.35, 0, z);
-    drawModel(MOD.pin, 3.3, 1.7 + Math.sin(t * 4) * 0.25, z, { ry: t * 2 });
+    const pd = place(o.run.distM * M2PX, 209);
+    drawModel(MOD.door, pd.x, 0, pd.z, { ry: pd.yaw });
+    const pn = place(o.run.distM * M2PX, 158);
+    drawModel(MOD.pin, pn.x, 1.7 + Math.sin(t * 4) * 0.25, pn.z, { ry: t * 2 });
   }
   // entities
   for (const e of (o.entities || [])) {
     const dz = e.y - traveled;
-    if (dz < -280 || dz > 3500) continue;
-    const x = e.x / PXU, z = -dz / PXU;
+    if (dz < -280 || dz > 5300) continue;
+    const pp = place(e.y, e.x);
+    const x = pp.x, z = pp.z, yw = pp.yaw;
     if (e.type === 'car') {
-      drawModel(MOD.shadow, x + 0.06, 0.03, z + 0.06, { s: [1.75, 1, 2.95] });
-      drawModel(carModel(e.col || CARCOLS[0]), x, 0, z);
+      drawModel(MOD.shadow, x + 0.06, 0.03, z + 0.06, { s: [1.75, 1, 2.95], ry: yw });
+      drawModel(carModel(e.col || CARCOLS[0]), x, 0, z, { ry: yw });
     } else if (e.type === 'cop') {
-      drawModel(MOD.shadow, x + 0.06, 0.03, z + 0.06, { s: [1.75, 1, 2.95] });
-      drawModel(Math.floor(t * 5) % 2 ? MOD.copA : MOD.copB, x, 0, z);
+      drawModel(MOD.shadow, x + 0.06, 0.03, z + 0.06, { s: [1.75, 1, 2.95], ry: yw });
+      drawModel(Math.floor(t * 5) % 2 ? MOD.copA : MOD.copB, x, 0, z, { ry: yw });
     } else if (e.type === 'barrier') {
-      drawModel(MOD.shadow, x + 0.05, 0.03, z, { s: [2.1, 1, 0.55] });
-      drawModel(MOD.barrier, x, 0, z);
+      drawModel(MOD.shadow, x + 0.05, 0.03, z, { s: [2.1, 1, 0.55], ry: yw });
+      drawModel(MOD.barrier, x, 0, z, { ry: yw });
       if (Math.floor(t * 3 + e.y * 0.01) % 2) drawModel(MOD.blink, x, 1.28, z);
     } else if (e.type === 'pothole') {
-      drawModel(MOD.pothole, x, 0, z);
+      drawModel(MOD.pothole, x, 0, z, { ry: yw });
     } else if (e.type === 'slice') {
       drawModel(MOD.shadow, x, 0.03, z, { s: [0.7, 1, 0.7] });
       drawModel(MOD.slice, x, 0.55 + Math.sin(t * 4 + e.y * 0.02) * 0.12, z, { ry: t * 2.4 + e.y * 0.01, tint: [1.18, 1.12, 1.0] });
@@ -633,22 +682,24 @@ function renderWorld(o) {
       drawModel(MOD.shadow, x, 0.03, z, { s: [0.5, 1, 0.5] });
       drawModel(MOD.stick, x, 0.55 + Math.sin(t * 4 + e.y * 0.02) * 0.12, z, { ry: t * 2.4, rz: 0.25, tint: [1.2, 1.12, 0.98] });
     } else if (e.type === 'trap') {
-      if (Math.floor(t * 4) % 2 === 0) drawModel(MOD.beam, 0, 0.55, z);
-      drawModel(MOD.cone, -3.05, 0.16, z);
-      drawModel(MOD.cone, 3.05, 0.16, z);
-      drawModel(MOD.trapCop, 4.5, 0.16, z, { ry: -Math.PI / 2, tint: e.busted && Math.floor(t * 8) % 2 ? [1.6, 0.7, 0.7] : WHITE_TINT });
+      const pb2 = place(e.y, 0);
+      if (Math.floor(t * 4) % 2 === 0) drawModel(MOD.beam, pb2.x, 0.55, pb2.z, { ry: pb2.yaw });
+      const pc1 = place(e.y, -146), pc2 = place(e.y, 146), pcc = place(e.y, 216);
+      drawModel(MOD.cone, pc1.x, 0.16, pc1.z);
+      drawModel(MOD.cone, pc2.x, 0.16, pc2.z);
+      drawModel(MOD.trapCop, pcc.x, 0.16, pcc.z, { ry: -Math.PI / 2 + pcc.yaw, tint: e.busted && Math.floor(t * 8) % 2 ? [1.6, 0.7, 0.7] : WHITE_TINT });
     }
   }
-  // player
+  // player — always at the origin of the bent frame, rotating through corners
   if (o.player) {
-    const px = o.player.xw, blinkOff = o.player.blink && Math.floor(t * 18) % 2 === 0;
+    const blinkOff = o.player.blink && Math.floor(t * 18) % 2 === 0;
     const tod2 = ((o.lvl || 1) - 1) % 3;
-    if (tod2 === 2) drawModel(MOD.lightcone, px, 0.02, -0.9);
-    drawModel(o.player.arriving ? MOD.walkShadow : MOD.shadow, px + 0.05, 0.035, 0.05, { s: [1.0, 1, 1.9] });
+    if (tod2 === 2) drawModel(MOD.lightcone, pp0.x, 0.02, pp0.z - 0.9, { ry: pp0.yaw });
+    drawModel(o.player.arriving ? MOD.walkShadow : MOD.shadow, pp0.x + 0.05, 0.035, pp0.z + 0.05, { s: [1.0, 1, 1.9], ry: pp0.yaw });
     if (!blinkOff) {
-      drawModel(scooterModel(o.player.skin), px, Math.sin(t * 16) * 0.02 + (o.player.stumble ? Math.sin(t * 44) * 0.05 : 0), 0, {
+      drawModel(scooterModel(o.player.skin), pp0.x, Math.sin(t * 16) * 0.02 + (o.player.stumble ? Math.sin(t * 44) * 0.05 : 0), pp0.z, {
         rz: -o.player.tilt * 0.38,
-        ry: -o.player.tilt * 0.16,
+        ry: -o.player.tilt * 0.16 + pp0.yaw,
         rx: o.boost ? 0.035 : 0,
         s: 0.92,
       });
@@ -669,29 +720,33 @@ function renderWorld(o) {
   const CAMTILT = -0.29; // face the chase camera
   const glow = (x, y, z, s, tint) => drawModel(MOD.disc, x, y, z, { s, tint, rx: CAMTILT });
   const sun = tod.sun;
-  glow(sun.p[0], sun.p[1], sun.p[2], sun.s * 1.6, sun.c);
-  glow(sun.p[0], sun.p[1], sun.p[2], sun.s * 4.6, [sun.c[0] * 0.35, sun.c[1] * 0.35, sun.c[2] * 0.35]);
+  {
+    const hh = place.h, ca2 = Math.cos(hh), sa2 = Math.sin(hh);
+    const sx2 = sun.p[0] * ca2 + sun.p[2] * sa2, sz2 = -sun.p[0] * sa2 + sun.p[2] * ca2;
+    glow(sx2, sun.p[1], sz2, sun.s * 1.6, sun.c);
+    glow(sx2, sun.p[1], sz2, sun.s * 4.6, [sun.c[0] * 0.35, sun.c[1] * 0.35, sun.c[2] * 0.35]);
+  }
   for (const e of (o.entities || [])) {
     const dz = e.y - traveled;
-    if (dz < -280 || dz > 3500) continue;
+    if (dz < -280 || dz > 5300) continue;
     if (e.type !== 'slice' && e.type !== 'stick') continue;
-    const x = e.x / PXU, z = -dz / PXU;
+    const pp = place(e.y, e.x);
     const yb = 0.95 + Math.sin(t * 4 + e.y * 0.02) * 0.12;
     const pulse = (0.8 + Math.sin(t * 6 + e.y * 0.03) * 0.2) * clamp(dz / 380, 0.12, 1);
     if (e.type === 'slice') {
-      glow(x, yb, z, 2.4, [0.5 * pulse, 0.38 * pulse, 0.1 * pulse]);
+      glow(pp.x, yb, pp.z, 2.4, [0.5 * pulse, 0.38 * pulse, 0.1 * pulse]);
     } else {
-      glow(x, yb - 0.25, z, 2.2, [0.5 * pulse, 0.36 * pulse, 0.13 * pulse]);
+      glow(pp.x, yb - 0.25, pp.z, 2.2, [0.5 * pulse, 0.36 * pulse, 0.13 * pulse]);
     }
   }
   for (const tn of turns) {
     if (tn.state !== 'pending') continue;
     const dz = tn.m * M2PX - traveled;
-    if (dz < -400 || dz > 3000) continue;
-    const z = -dz / PXU;
+    if (dz < -400 || dz > 5000) continue;
     for (let k = 0; k < 3; k++) {
       const b = (0.4 + Math.abs(Math.sin(t * 4 - k * 0.9)) * 0.6) * clamp(dz / 380, 0.15, 1);
-      glow((k - 1) * 1.15 * tn.dir, 0.3, z, 2.0, [0.32 * b, 0.25 * b, 0.04 * b]);
+      const pc = place(tn.m * M2PX, (k - 1) * 55 * tn.dir);
+      glow(pc.x, 0.3, pc.z, 2.0, [0.32 * b, 0.25 * b, 0.04 * b]);
     }
   }
   gl.disable(gl.BLEND);
@@ -911,7 +966,7 @@ function primaryAction() {
 let state = 'title', stateT = 0;
 let run = null, player = null;
 let entities = [], parts = [], pops = [];
-let shake = 0, flashW = 0, flashR = 0, worldRot = 0, turnSwing = null;
+let shake = 0, flashW = 0, flashR = 0, worldRot = 0;
 let tTitle = 0, tGlobal = 0, shopShake = null;
 function setState(s) { state = s; stateT = 0; }
 
@@ -957,7 +1012,7 @@ function startRun(lvl) {
   pendingOrder = null;
   player = { lane: 1, x: laneX(1), tlane: 1, boxes: 3, inv: 0, tilt: 0, slices: 0, combo: 0, comboT: 0, speedMul: 1, stumble: 0 };
   entities = []; parts = []; pops = []; parts3 = [];
-  shake = 0; flashW = 0; flashR = 0; worldRot = 0; turnSwing = null;
+  shake = 0; flashW = 0; flashR = 0; worldRot = 0;
   boostTouch = false; boostKey = false;
   setState('play');
   tony('start');
@@ -1085,9 +1140,8 @@ function onSwipe(dir) {
 function doTurn(tn) {
   tn.state = 'done';
   sfx.turn();
-  turnSwing = { t: 0, dur: 0.85, dir: tn.dir };
   worldRot = tn.dir * 0.2;
-  flashW = 0.12;
+  flashW = 0.1;
   run.score += 100;
   run.heatBonus += 1.5;
   pop(cx, H * 0.3, 'PERFECT TURN! +100', GOLD, 1.25);
@@ -1209,9 +1263,15 @@ function updatePlay(dt) {
       sfx.miss();
       tony('turnMiss');
       pop(cx, H * 0.3, 'MISSED TURN! +' + Math.round(add) + 'm', '#FF8A80', 1.1);
+      // route un-bends to straight (GPS re-routed): clear content ahead to mask the snap
+      entities = entities.filter(e => e.y < run.traveled + 60);
+      run.nextSpawn = Math.max(run.nextSpawn, run.traveled + 900);
     }
-    if ((tn.state === 'done' || tn.state === 'missed') && dpx < -280) run.ti++;
+    if ((tn.state === 'done' || tn.state === 'missed') && dpx < -450) run.ti++;
   }
+  // the corner the road visibly bends at (pending: telegraphs; done: we sweep through it)
+  const ctn = run.turns[run.ti];
+  run.corner = ctn && ctn.state !== 'missed' ? { S: ctn.m * M2PX, dir: ctn.dir, taken: ctn.state === 'done' } : null;
 
   // arrival
   if (!run.arriving && remM <= 32) {
@@ -1221,7 +1281,7 @@ function updatePlay(dt) {
   if (remM <= 0 && !run.over) { finishRun(); return; }
 
   // spawning (out past the fog line so nothing pops in)
-  while (run.nextSpawn < run.traveled + 3400) {
+  while (run.nextSpawn < run.traveled + 5100) {
     const y = run.nextSpawn;
     const remAtY = run.distM - y / M2PX;
     if (remAtY < 55) { run.nextSpawn += 240; continue; }
@@ -1244,7 +1304,7 @@ function updatePlay(dt) {
     }
     const dz = e.y - run.traveled; // >0 = ahead of the player
     if (dz < -300) { entities.splice(i, 1); continue; }
-    if (dz > 3500) continue;
+    if (dz > 5300) continue;
 
     if (e.type === 'slice' || e.type === 'stick') {
       if (Math.abs(dz) < 52 && Math.abs(e.x - player.x) < 62) {
@@ -1316,7 +1376,6 @@ function updateFx(dt) {
   flashW = Math.max(0, flashW - dt * 1.6);
   flashR = Math.max(0, flashR - dt * 1.4);
   worldRot *= Math.exp(-dt * 3.4);
-  if (turnSwing) { turnSwing.t += dt; if (turnSwing.t >= turnSwing.dur) turnSwing = null; }
   if (bubble) { bubble.t += dt; if (bubble.t > bubble.dur) bubble = null; }
   for (let i = pops.length - 1; i >= 0; i--) {
     const p = pops[i];
@@ -1991,7 +2050,7 @@ function renderScene(t) {
   } else {
     renderWorld({
       traveled: run.traveled, px: player.x, t, lvl: run.lvl,
-      entities, turns: run.turns, run, swing: turnSwing,
+      entities, turns: run.turns, run, corner: run.corner,
       boost: isBoost() && !run.over,
       player: {
         xw: player.x / PXU, skin: curSkin(), tilt: player.tilt,

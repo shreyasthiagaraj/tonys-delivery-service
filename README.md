@@ -25,13 +25,18 @@ Stages are straight for now — the core game and visuals come first; turns retu
 
 ## Design decisions
 
-- **Top-down voxel style** (reference-driven): a hand-rolled WebGL renderer — zero libraries — draws box-list voxel models under a steep chase camera (~72° pitch, ground fills the frame, no horizon). Neutral-white light, soft distance haze. All models are code: scooter + rider + pizza box, cars with glass cabins and glowing taillights, cop cars with alternating light bars, striped barriers, glowing breadsticks, palms, market stalls with green awnings, green curb blocks on stone sidewalks over orange sand.
-- **Real bloom post-processing**: scene renders to a framebuffer, a luminance bright-pass extracts highlights at quarter res, two-pass Gaussian blur, additive composite with a soft vignette. Deliberate emissives (taillight/light-bar/blinker/boost-flame glow discs, breadstick halos with orbiting sparkles) feed the bloom; the scooter leaves a trail of white cross-shaped exhaust puffs on the road.
-- **2D HUD overlay** on a second canvas, reference-styled: gold pizza medallion, breadstick pill, countdown timer pill (green→amber→pulsing red), gold route-progress bar (scooter dot → pin), chunky centered score, Tony's speech bubble, rounded-square pause. Crisp at any DPI.
-- **Italian-flag palette** — Tony Red `#E63946`, Basil Green `#2A9D5C`, Cheese Gold `#FFC93F`, Mozzarella Cream `#FFF6E3` over desert sand and blue-grey asphalt.
+- **Top-down voxel style**, rendered by a hand-rolled WebGL2 engine with zero libraries. Long lens (~36°) from 40 units up, so box edges stay near-parallel and the street reads as a diorama rather than a phone-camera snapshot. All models are code: scooter + rider + pizza box, cars with glass cabins and glowing taillights, cop cars with alternating light bars, striped barriers, glowing breadsticks, palms, market stalls, streetlamps, Mediterranean facades with shutters and awnings.
+- **Physically-grounded lighting.** Colors are authored in sRGB, decoded to linear, lit in linear, then run through an ACES filmic tonemap and re-encoded once at the end of post. Per-pixel Blinn-Phong with a raking sun.
+- **Real directional shadows** — a 2048² depth map on a texel-snapped orthographic frustum that tracks the player, sampled with 3×3 PCF. Everything casts: cars, buildings, lamps, the scooter.
+- **HDR bloom.** The scene renders to an `RGBA16F` target, so lights genuinely exceed 1.0 and the bright-pass can tell a lamp from a white wall. A mip-chain pyramid (13-tap downsample, 9-tap tent upsample) gives a hot core with a soft, wide tail.
+- **Forward point lights** — every breadstick, taillight, light bar, blinker and streetlamp is a real light that illuminates the road and the geometry around it; the 8 nearest to the player win a slot.
+- **SSAO** from scene depth, **tilt-shift depth of field** focused on the player, world-space surface grain, and a color grade (saturation lift, soft S-curve, cool shadows / warm highlights).
+- **Near-miss cinematic** — squeeze past a car and time dilates, the world streaks radially past you with chromatic aberration, the lens punches out, and the mix ducks. The clip generator.
+- **Time of day drives everything** — sun, sky, fog, ambient, point-light gain, streetlamps and **wet asphalt** all come off one index that advances every two levels. At night the lamps are the only thing lighting the street, they hang volumetric cones of lit air, and the wet road mirrors them back.
+- **Anti-aliasing**: 4× MSAA into the HDR framebuffer, resolved by blit. WebGL1 falls back to supersampling, drops shadows/SSAO, and stays fully playable.
+- **2D HUD overlay** on a second canvas: gold pizza medallion, breadstick pill, countdown timer pill (green→amber→pulsing red), gold route-progress bar (scooter dot → pin), chunky centered score, Tony's speech bubble, rounded-square pause. Crisp at any DPI.
 - **All audio is synthesized** — WebAudio step-sequencer plays a tarantella-flavored loop (tempo rises with level); SFX are synth blips/noise bursts. No audio files.
-- **Levels are deliveries** — 20–60 second runs (hyper-casual sweet spot), death→retry is one tap, first delivery opens fail-proof (research: player must understand success within 10s).
-- **Time-of-day cycling** — day / sunset / night sky, fog, and lighting every 3 levels (night adds a headlight pool) for visual variety in clips.
+- **Levels are deliveries** — 20–60 second runs (hyper-casual sweet spot), death→retry is one tap, first delivery opens fail-proof (research: player must understand success within 10s). Crash into something and it shatters into the voxels it was built from.
 
 ## Research findings baked in
 

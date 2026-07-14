@@ -78,10 +78,14 @@ const FONT = "'Arial Rounded MT Bold','Hiragino Maru Gothic ProN','Nunito','Treb
 // Light values are LINEAR and HDR: the sun is allowed past 1.0, the ambient is the cool
 // sky bounce that fills the shadow side. Fog is measured on the ground plane, so these
 // distances are how far DOWN THE ROAD the haze starts — not how far from the camera's eye.
+const L_GOLD = [1.0, 0.62, 0.16], L_RED = [1.0, 0.09, 0.04], L_BLUE = [0.14, 0.28, 1.0];
+const L_LAMP = [1.0, 0.78, 0.42], L_FIRE = [1.0, 0.40, 0.09];
+// two levels per mood, then it rolls over: day -> sunset -> night
+const todIdx = lvl => Math.floor((Math.max(1, lvl) - 1) / 2) % 3;
 const TIMES = [ // day / sunset / night
-  { sky: '#CBDAE4', fogN: 38, fogF: 82, amb: [0.34, 0.38, 0.45], light: [1.02, 0.97, 0.87], sun: [0.551, 0.702, -0.451] },
-  { sky: '#E9B896', fogN: 36, fogF: 78, amb: [0.30, 0.26, 0.30], light: [1.20, 0.78, 0.48], sun: [0.72, 0.36, -0.59] },
-  { sky: '#1E2749', fogN: 34, fogF: 74, amb: [0.08, 0.10, 0.18], light: [0.20, 0.24, 0.42], sun: [0.40, 0.80, -0.44] },
+  { sky: '#CBDAE4', fogN: 38, fogF: 82, amb: [0.34, 0.38, 0.45], light: [1.02, 0.97, 0.87], sun: [0.551, 0.702, -0.451], pt: 0.45, lamp: false, wet: 0 },
+  { sky: '#E9B896', fogN: 36, fogF: 78, amb: [0.30, 0.26, 0.30], light: [1.20, 0.78, 0.48], sun: [0.72, 0.36, -0.59], pt: 0.62, lamp: true, wet: 0.45 },
+  { sky: '#1E2749', fogN: 34, fogF: 74, amb: [0.08, 0.10, 0.18], light: [0.20, 0.24, 0.42], sun: [0.40, 0.80, -0.44], pt: 1.05, lamp: true, wet: 0.9 },
 ];
 
 // ---------- save ----------
@@ -193,6 +197,31 @@ let gl = null, prog = null, loc = {}, isGL2 = false, hdrOK = false, HALF = 0, SA
 // fragment shaders: highp where the device has it, mediump otherwise
 const FSP = '#ifdef GL_FRAGMENT_PRECISION_HIGH\nprecision highp float;\n#else\nprecision mediump float;\n#endif\n';
 const VSTRIDE = 40; // pos3 + norm3 + col3 + emis1, interleaved
+// Forward point lights. The world is a narrow corridor and the camera only ever sees a
+// slab of it, so the N nearest lights to the player are the only ones that can matter —
+// clustering would be machinery for a problem this scene doesn't have.
+const NLIGHT = 8;
+const lightP = new Float32Array(NLIGHT * 4); // xyz = position, w = radius
+const lightC = new Float32Array(NLIGHT * 3); // linear HDR colour
+let lightN = 0;
+const lightPool = [];
+function addLight(x, y, z, r, col, i) {
+  lightPool.push({ x, y, z, r, col, i });
+}
+function uploadLights(px, pz) {
+  // nearest-first, because a light you can't see doesn't get to occupy one of the 8 slots
+  lightPool.sort((a, b) => ((a.x - px) ** 2 + (a.z - pz) ** 2) - ((b.x - px) ** 2 + (b.z - pz) ** 2));
+  lightN = Math.min(NLIGHT, lightPool.length);
+  for (let k = 0; k < lightN; k++) {
+    const L = lightPool[k];
+    lightP[k * 4] = L.x; lightP[k * 4 + 1] = L.y; lightP[k * 4 + 2] = L.z; lightP[k * 4 + 3] = L.r;
+    lightC[k * 3] = L.col[0] * L.i; lightC[k * 3 + 1] = L.col[1] * L.i; lightC[k * 3 + 2] = L.col[2] * L.i;
+  }
+  gl.uniform4fv(loc.uLP, lightP);
+  gl.uniform3fv(loc.uLC, lightC);
+  gl.uniform1f(loc.uLN, lightN);
+  lightPool.length = 0;
+}
 function compile(type, src) {
   const s2 = gl.createShader(type);
   gl.shaderSource(s2, src);
@@ -254,7 +283,8 @@ function initGL() {
     'varying vec3 vBase;varying vec3 vNorm;varying vec3 vWP;varying float vE;' +
     'uniform vec3 uLightDir;uniform vec3 uLightCol;uniform vec3 uAmbCol;' +
     'uniform vec3 uEye;uniform vec2 uFog;uniform vec3 uFogCol;uniform float uSpec;' +
-    'uniform mat4 uLightVP;uniform sampler2D uShadow;uniform vec2 uSM;' + // uSM = (texel, on)
+    'uniform mat4 uLightVP;uniform sampler2D uShadow;uniform vec2 uSM;uniform float uWet;' +
+    'uniform vec4 uLP[' + NLIGHT + '];uniform vec3 uLC[' + NLIGHT + '];uniform float uLN;' +
     'float shade(float ndl){' +
     'if(uSM.y<0.5)return 1.0;' +
     'vec4 ls=uLightVP*vec4(vWP,1.0);' +
@@ -267,16 +297,48 @@ function initGL() {
     'float d=texture2D(uShadow,p.xy+vec2(float(i),float(j))*uSM.x).r;' +
     's+=step(p.z-b,d);}}' +
     'return s*0.1111;}' +
+    // Value noise, sampled on the world plane. Big flat slabs of one colour read as plastic
+    // no matter how good the palette is; this is the grain that makes asphalt asphalt.
+    'float h21(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}' +
+    'float vnoise(vec2 p){vec2 i=floor(p),f=fract(p);f=f*f*(3.0-2.0*f);' +
+    'return mix(mix(h21(i),h21(i+vec2(1,0)),f.x),mix(h21(i+vec2(0,1)),h21(i+vec2(1,1)),f.x),f.y);}' +
     'void main(){' +
     'vec3 n=normalize(vNorm);' +
     'float d=max(dot(n,uLightDir),0.0);' +
     'float sh=shade(d);' +
-    'vec3 lit=vBase*(uAmbCol+uLightCol*d*sh);' +
+    // grain only on up-facing surfaces (roads, pavement, ground) — walls stay clean
+    'float up=max(n.y,0.0);' +
+    'float g=(vnoise(vWP.xz*3.1)*0.6+vnoise(vWP.xz*11.0)*0.4-0.5)*0.13*up;' +
+    // WET STREET. Puddled asphalt is darker and far glossier, so it stops scattering light
+    // and starts MIRRORING it. Under this camera that is the whole reflection: every lamp
+    // and taillight smears down the road as a hard specular streak.
+    'float wetn=vnoise(vWP.xz*0.55);' +
+    'float wet=uWet*up*smoothstep(0.30,0.75,wetn);' +
+    'vec3 base=vBase*(1.0+g)*mix(1.0,0.55,wet);' +
+    'float gloss=mix(28.0,220.0,wet);' +
+    'float sp=uSpec+wet*0.85;' +
+    'vec3 lit=base*(uAmbCol+uLightCol*d*sh);' +
     'vec3 V=normalize(uEye-vWP);' +
     'vec3 Hv=normalize(uLightDir+V);' +
-    'lit+=uLightCol*uSpec*pow(max(dot(n,Hv),0.0),28.0)*step(0.0001,d)*sh;' +
+    'lit+=uLightCol*sp*pow(max(dot(n,Hv),0.0),gloss)*step(0.0001,d)*sh;' +
+    // a wet surface also mirrors the sky, strongest at grazing angles
+    'float fres=pow(1.0-clamp(dot(n,V),0.0,1.0),4.0);' +
+    'lit+=uFogCol*wet*fres*0.55;' +
+    // POINT LIGHTS. Every breadstick, taillight, lamp and blinker is a real light that
+    // spills onto the road and the geometry around it. Before, they were additive
+    // billboards pasted over the frame — light ON the screen, not light IN the world.
+    'for(int i=0;i<' + NLIGHT + ';i++){' +
+    'if(float(i)>=uLN)break;' +
+    'vec3 dv=uLP[i].xyz-vWP;' +
+    'float q=dot(dv,dv);' +
+    'float r=uLP[i].w;' +
+    'float att=clamp(1.0-q/(r*r),0.0,1.0);att*=att;' +
+    'vec3 ld=dv*inversesqrt(max(q,0.0001));' +
+    'lit+=base*uLC[i]*(max(dot(n,ld),0.0)*att);' +
+    // the glint that becomes a reflection once the road is wet
+    'lit+=uLC[i]*sp*pow(max(dot(n,normalize(ld+V)),0.0),gloss*1.6)*att;}' +
     // emission rides on top and is free to exceed 1.0 — that is what feeds the bloom
-    'vec3 c=lit+vBase*vE;' +
+    'vec3 c=lit+base*vE;' +
     // fog on GROUND-PLANE distance. Measuring from the eye made the camera's altitude
     // count against every pixel, which is what beiged the top third of the frame.
     'float f=clamp((length(vWP.xz-uEye.xz)-uFog.x)/(uFog.y-uFog.x),0.0,1.0);' +
@@ -284,7 +346,7 @@ function initGL() {
   prog = link(vs, fs);
   if (!prog) { gl = null; return; }
   gl.useProgram(prog);
-  for (const n of ['uMVP', 'uModel', 'uLightDir', 'uLightCol', 'uAmbCol', 'uTint', 'uEye', 'uFog', 'uFogCol', 'uEmis', 'uSpec', 'uLightVP', 'uShadow', 'uSM']) loc[n] = gl.getUniformLocation(prog, n);
+  for (const n of ['uMVP', 'uModel', 'uLightDir', 'uLightCol', 'uAmbCol', 'uTint', 'uEye', 'uFog', 'uFogCol', 'uEmis', 'uSpec', 'uLightVP', 'uShadow', 'uSM', 'uLP', 'uLC', 'uLN', 'uWet']) loc[n] = gl.getUniformLocation(prog, n);
   loc.aPos = gl.getAttribLocation(prog, 'aPos');
   loc.aNorm = gl.getAttribLocation(prog, 'aNorm');
   loc.aCol = gl.getAttribLocation(prog, 'aCol');
@@ -392,6 +454,32 @@ function voxModel(boxes) {
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(verts), gl.STATIC_DRAW);
   return { vbo, count: verts.length / 10 };
 }
+// VOLUMETRIC LIGHT CONE. Screen-space god-rays are useless under a top-down camera — the
+// sun is behind you, so there is nothing to radiate from. What DOES read from directly
+// overhead is the beam itself: a cone of lit air hanging under every lamp. Bright at the
+// bulb, transparent at the floor, and open at the bottom so you look down into it.
+function coneModel() {
+  const verts = [];
+  const N = 20, R = 1.0;
+  const v = (x, y, z, c) => verts.push(x, y, z, 0, 1, 0, c, c, c, 1);
+  for (let i = 0; i < N; i++) {
+    const a0 = i / N * TAU, a1 = (i + 1) / N * TAU;
+    const c0 = Math.cos(a0), s0 = Math.sin(a0), c1 = Math.cos(a1), s1 = Math.sin(a1);
+    // apex at the bulb (bright), skirt at the ground (transparent)
+    v(0, 0, 0, 0.42);
+    v(c0 * R, -1, s0 * R, 0);
+    v(c1 * R, -1, s1 * R, 0);
+    // a soft disc where the cone lands, so the pool reads as part of the same beam
+    v(0, -0.99, 0, 0.16);
+    v(c1 * R * 0.95, -0.99, s1 * R * 0.95, 0);
+    v(c0 * R * 0.95, -0.99, s0 * R * 0.95, 0);
+  }
+  if (!gl) return { count: 0 };
+  const vbo = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(verts), gl.STATIC_DRAW);
+  return { vbo, count: verts.length / 10 };
+}
 function discModel() {
   // radial gradient disc with a HOT core: center 1.0 -> 0.42 at 30% radius -> 0 at rim.
   // The steep inner falloff is what makes additive light read as light, not grey haze.
@@ -483,14 +571,9 @@ function buildRoadSeg(seed) {
     b.push([-wc, 0.021, jz, ww, 0.165, 0.05, P_KERB]);
     b.push([wc, 0.021, jz, ww, 0.165, 0.05, P_KERB]);
   }
-  // Asphalt grit. These sit 2mm proud of the road, not 1cm: any more and the lip catches
-  // the light, casts a hairline shadow, and the "wear" reads as a stack of grey rectangles.
-  const np = 2 + Math.floor(H(1) * 3);
-  for (let i = 0; i < np; i++) {
-    const px = (H(i * 3 + 5) - 0.5) * 6.2, pz = (H(i * 3 + 6) - 0.5) * (SEG_LEN - 0.6);
-    const pw2 = 0.7 + H(i * 3 + 7) * 1.5, pd = 0.6 + H(i * 3 + 8) * 1.2;
-    b.push([px, -0.059, pz, pw2, 0.122, pd, ROADGRIT[i % ROADGRIT.length]]);
-  }
+  // Asphalt wear used to be modelled as flat boxes laid on the road. However close in value
+  // they got, a rectangle is a rectangle — they always read as tiles. The shader's world-
+  // space grain does this job properly now, so the geometry is gone.
   if (H(2) > 0.78) { // manhole
     const mx = (H(9) - 0.5) * 5;
     b.push([mx, -0.048, (H(10) - 0.5) * 3, 0.62, 0.13, 0.62, '#3A3E49']);
@@ -543,6 +626,7 @@ function buildChevron() { // ">" pointing +x, lying on the road
 }
 // Mediterranean facades: ochre, terracotta, cream, sage, rose, faded blue. The old set was
 // six pale pastels that all read as the same beige at a glance.
+const plotLamps = [];
 const WALLCOLS = ['#D9A85C', '#C86B4E', '#E3D3AE', '#A8B58A', '#CE8E80', '#9FB6C4', '#D4B483', '#B9765C'];
 const ROOFCOLS = ['#A5604B', '#AF6852', '#985742'];
 function buildPlot(seed) { // one 4u-deep roadside plot: building / piazza / market / yard
@@ -612,13 +696,16 @@ function buildPlot(seed) { // one 4u-deep roadside plot: building / piazza / mar
     b.push([0.6, 0.22, 1.1, 0.7, 0.44, 0.7, SOIL]);
     b.push([0.6, 0.58, 1.1, 0.6, 0.4, 0.6, GRASS[1]]);
   }
-  // a streetlamp on most plots — vertical punctuation, and a light source come nightfall
+  // a streetlamp on most plots — vertical punctuation, and a real light source come dusk
+  let lamp = null;
   if (hash(seed * 71 + 9) > 0.42) {
     const lz = (hash(seed * 73) - 0.5) * 2.4;
     b.push([-3.1, 1.5, lz, 0.14, 3.0, 0.14, '#6E6A61']);
     b.push([-2.75, 3.0, lz, 0.8, 0.12, 0.14, '#6E6A61']);
-    b.push([-2.42, 2.88, lz, 0.3, 0.16, 0.3, '#FFE9B0', 0.5]);
+    b.push([-2.42, 2.88, lz, 0.3, 0.16, 0.3, '#FFE9B0', 0.32]);
+    lamp = { x: -2.42, y: 2.88, z: lz };
   }
+  plotLamps.push(lamp); // parallel to MOD.plots, so the light pass can find the bulbs
   return voxModel(b);
 }
 // the 8th slot on a box is EMISSIVE: how far above 1.0 it drives its own colour.
@@ -768,6 +855,7 @@ function buildModels() {
   }
   MOD.farcity = voxModel(cityB);
   MOD.disc = discModel();
+  MOD.cone3 = coneModel();
   // exhaust puff: little white plus/cross lying on the road (reference style)
   MOD.puff = voxModel([
     [0, 0, 0, 0.16, 0.05, 0.16, '#E6E2D4'],
@@ -795,6 +883,7 @@ let post = null, SS = 1, EXPOSURE = 1.28, BLOOM = 0.26;
 // lives near the bottom) and softens into the distance. Gameplay clarity beats a textbook
 // tilt-shift: whatever else happens, the thing you are steering stays crisp.
 let DOF_Y = 0.27, DOF_NEAR = 0.30, DOF_FALL = 0.46;
+let AO_RADIUS = 26, AO_STRENGTH = 0.55;
 function initPost() {
   if (!gl) return;
   try {
@@ -831,6 +920,26 @@ function initPost() {
       'vec3 l=texture2D(uT,vUV+vec2(-1.0,-1.0)*t).rgb,m=texture2D(uT,vUV+vec2(1.0,-1.0)*t).rgb;' +
       'vec3 r=e*0.125+(a+c+g+i)*0.03125+(b+d+f+h)*0.0625+(j+k+l+m)*0.125;' +
       'gl_FragColor=vec4(r,1.0);}', ['uT', 'uD']);
+    // SSAO from scene depth alone. Spiral-sample the neighbourhood; wherever the geometry
+    // around a pixel sits CLOSER to the camera than the pixel does, it is being occluded.
+    // The kernel is rotated per-pixel so the error becomes noise, and half-res + bilinear
+    // upsampling turns that noise into a soft gradient.
+    const ssao = mkProg(
+      'varying vec2 vUV;uniform sampler2D uT;uniform vec3 uK;uniform vec2 uD;' + // uK=(near,far,radiusPx)
+      'float lin(float d){return (2.0*uK.x)/(uK.y+uK.x-(d*2.0-1.0)*(uK.y-uK.x));}' +
+      'void main(){' +
+      'float c=lin(texture2D(uT,vUV).r);' +
+      'if(c>uK.y*0.85){gl_FragColor=vec4(1.0);return;}' +
+      'float ang=fract(sin(dot(vUV,vec2(12.9898,78.233)))*43758.5453)*6.2831;' +
+      'float occ=0.0;' +
+      'for(int i=0;i<10;i++){' +
+      'float f=(float(i)+0.5)*0.1;' +
+      'float a=ang+f*15.0;' +
+      'vec2 o=vec2(cos(a),sin(a))*f*uK.z*uD;' +
+      'float s=lin(texture2D(uT,vUV+o).r);' +
+      'float diff=c-s;' + // sample is nearer the camera => it occludes us
+      'occ+=step(0.03,diff)*(1.0-smoothstep(0.0,1.4,diff));}' +
+      'gl_FragColor=vec4(vec3(1.0-occ*0.1),1.0);}', ['uT', 'uK', 'uD']);
     const up = mkProg( // 9-tap tent, blended additively into the next mip up
       'varying vec2 vUV;uniform sampler2D uT;uniform vec2 uD;' +
       'void main(){vec2 t=uD;' +
@@ -840,16 +949,30 @@ function initPost() {
       '+texture2D(uT,vUV+vec2(1.0,0.0)*t).rgb+texture2D(uT,vUV+vec2(0.0,-1.0)*t).rgb)*2.0;' +
       'r+=texture2D(uT,vUV).rgb*4.0;' +
       'gl_FragColor=vec4(r*0.0625,1.0);}', ['uT', 'uD']);
-    // COMPOSITE: tilt-shift DOF, bloom, exposure, ACES, grade, vignette, sRGB encode.
+    // COMPOSITE: speed/near-miss streak, tilt-shift DOF, bloom, exposure, ACES, grade,
+    // vignette, sRGB encode.
     const comp = mkProg(
       'varying vec2 vUV;uniform sampler2D uT;uniform sampler2D uB;uniform sampler2D uC;' +
-      'uniform vec2 uP;uniform vec3 uG;' +
+      'uniform sampler2D uS;uniform vec2 uP;uniform vec3 uG;uniform vec3 uA;uniform float uAO;' +
       'vec3 aces(vec3 x){return clamp((x*(2.51*x+0.03))/(x*(2.43*x+0.59)+0.14),0.0,1.0);}' +
       'void main(){' +
-      // tilt-shift: a crisp band across the middle, falling off top and bottom. This is the
+      'vec3 c;' +
+      // Radial streak + chromatic aberration, centred on the scooter. Drives the near-miss
+      // punch and the boost. The world smears past you while you stay dead sharp.
+      'if(uA.x>0.002){' +
+      'vec2 d=(vUV-uA.yz)*uA.x*0.030;' +
+      'vec2 ca=(vUV-uA.yz)*uA.x*0.0032;' +
+      'vec3 acc=vec3(0.0);' +
+      'for(int i=0;i<6;i++){' +
+      'vec2 uv=vUV-d*(float(i)/5.0);' +
+      'acc.r+=texture2D(uT,uv+ca).r;acc.g+=texture2D(uT,uv).g;acc.b+=texture2D(uT,uv-ca).b;}' +
+      'c=acc/6.0;' +
+      '}else{c=texture2D(uT,vUV).rgb;}' +
+      // tilt-shift: a crisp band on the player, falling off into the distance. This is the
       // cue that sells "miniature" — and the blurred buffer already exists for the bloom.
       'float coc=smoothstep(uG.y,uG.y+uG.z,abs(vUV.y-uG.x));' +
-      'vec3 c=mix(texture2D(uT,vUV).rgb,texture2D(uC,vUV).rgb,coc*0.9);' +
+      'c=mix(c,texture2D(uC,vUV).rgb,coc*0.9);' +
+      'c*=mix(1.0,texture2D(uS,vUV).r,uAO);' +
       'c+=texture2D(uB,vUV).rgb*uP.y;' +
       'c=aces(c*uP.x);' +
       // grade: saturation lift, soft contrast S-curve, cool shadows / warm highlights
@@ -859,11 +982,11 @@ function initPost() {
       'c+=vec3(0.022,0.006,-0.016)*c;' +
       'vec2 q=vUV-0.5;' +
       'c*=1.0-0.36*smoothstep(0.18,0.95,dot(q,q)*2.2);' +
-      'gl_FragColor=vec4(pow(max(c,0.0),vec3(0.4545)),1.0);}', ['uT', 'uB', 'uC', 'uP', 'uG']);
+      'gl_FragColor=vec4(pow(max(c,0.0),vec3(0.4545)),1.0);}', ['uT', 'uB', 'uC', 'uS', 'uP', 'uG', 'uA', 'uAO']);
     post = {
-      qvbo, bright, down, up, comp,
+      qvbo, bright, down, up, comp, ssao,
       msaaOK: isGL2 && SAMPLES > 1,
-      scene: null, msaa: null, mips: [], dofA: null, dofB: null, w: 0, h: 0,
+      scene: null, msaa: null, mips: [], dofA: null, dofB: null, ao: null, w: 0, h: 0,
     };
     // no MSAA (WebGL1) => supersample instead, then let the composite's bilinear fetch
     // resolve it. At exactly 2x that lands between texels and gives a free 2x2 box filter.
@@ -888,15 +1011,30 @@ function mkTarget(w, h, depth, float) {
   const fb = gl.createFramebuffer();
   gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
   gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  const o = { tex, fb, w, h };
   if (depth) {
-    const rb = gl.createRenderbuffer();
-    gl.bindRenderbuffer(gl.RENDERBUFFER, rb);
-    gl.renderbufferStorage(gl.RENDERBUFFER, isGL2 ? gl.DEPTH_COMPONENT24 : gl.DEPTH_COMPONENT16, w, h);
-    gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, rb);
+    // Depth as a TEXTURE, not a renderbuffer: SSAO needs to read it back in post. On the
+    // no-MSAA path this is the scene depth directly; with MSAA we render depth separately.
+    if (isGL2) {
+      const dt = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, dt);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.DEPTH_COMPONENT24, w, h, 0, gl.DEPTH_COMPONENT, gl.UNSIGNED_INT, null);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, dt, 0);
+      o.depth = dt;
+    } else {
+      const rb = gl.createRenderbuffer();
+      gl.bindRenderbuffer(gl.RENDERBUFFER, rb);
+      gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, w, h);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, rb);
+    }
   }
   const ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-  return ok ? { tex, fb, w, h } : null;
+  return ok ? o : null;
 }
 function mkMS(w, h) { // multisampled color+depth renderbuffers (WebGL2 only)
   const fb = gl.createFramebuffer();
@@ -932,42 +1070,40 @@ function sizePost() {
     post.mips.push(mkTarget(mw, mh, false, true));
     mw = Math.max(1, mw >> 1); mh = Math.max(1, mh >> 1);
   }
+  post.ao = isGL2 ? mkTarget(Math.max(2, w >> 1), Math.max(2, h >> 1), false, false) : null;
   post.dofA = mkTarget(Math.max(2, w >> 2), Math.max(2, h >> 2), false, true);
   post.dofB = mkTarget(Math.max(2, w >> 3), Math.max(2, h >> 3), false, true);
 }
 // where the scene pass renders: the multisampled buffer if we have one, else straight to
 // the resolve texture.
 const sceneFB = () => post && (post.msaa || post.scene);
-function quadPass(pr, target, tex0, tex1, setup, tex2) {
+const TEXU = ['uT', 'uB', 'uC', 'uS']; // sampler uniform per texture unit
+function quadPass(pr, target, texes, setup) {
   gl.bindFramebuffer(gl.FRAMEBUFFER, target ? target.fb : null);
   gl.viewport(0, 0, target ? target.w : glc.width, target ? target.h : glc.height);
   gl.useProgram(pr.p);
   gl.bindBuffer(gl.ARRAY_BUFFER, post.qvbo);
   gl.enableVertexAttribArray(pr.aP);
   gl.vertexAttribPointer(pr.aP, 2, gl.FLOAT, false, 0, 0);
-  gl.activeTexture(gl.TEXTURE0);
-  gl.bindTexture(gl.TEXTURE_2D, tex0);
-  gl.uniform1i(pr.uT, 0);
-  if (tex1 !== undefined) {
-    gl.activeTexture(gl.TEXTURE1);
-    gl.bindTexture(gl.TEXTURE_2D, tex1);
-    gl.uniform1i(pr.uB, 1);
-  }
-  if (tex2 !== undefined) {
-    gl.activeTexture(gl.TEXTURE2);
-    gl.bindTexture(gl.TEXTURE_2D, tex2);
-    gl.uniform1i(pr.uC, 2);
+  for (let i = 0; i < texes.length; i++) {
+    gl.activeTexture(gl.TEXTURE0 + i);
+    gl.bindTexture(gl.TEXTURE_2D, texes[i]);
+    gl.uniform1i(pr[TEXU[i]], i);
   }
   gl.activeTexture(gl.TEXTURE0);
   if (setup) setup();
   gl.drawArrays(gl.TRIANGLES, 0, 6);
 }
 function runPost() {
-  // resolve the multisampled scene into a sampleable texture
+  // resolve the multisampled scene into sampleable textures. DEPTH comes across too — SSAO
+  // reads it back, and it is the same buffer the shadow pass already taught us to make.
   if (post.msaa) {
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, post.msaa.fb);
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, post.scene.fb);
     gl.blitFramebuffer(0, 0, post.w, post.h, 0, 0, post.w, post.h, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    if (post.scene.depth) {
+      gl.blitFramebuffer(0, 0, post.w, post.h, 0, 0, post.w, post.h, gl.DEPTH_BUFFER_BIT, gl.NEAREST);
+    }
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   }
   gl.disable(gl.DEPTH_TEST);
@@ -980,26 +1116,36 @@ function runPost() {
   const thr = hdrOK ? 1.25 : 0.80;
   const tx = m => [1 / m.w, 1 / m.h];
   // bright-pass straight into the top of the pyramid
-  quadPass(post.bright, M[0], post.scene.tex, undefined, () => gl.uniform3f(post.bright.uK, thr, 0.6, EXPOSURE));
+  quadPass(post.bright, M[0], [post.scene.tex], () => gl.uniform3f(post.bright.uK, thr, 0.6, EXPOSURE));
   // ...down the pyramid...
   for (let i = 1; i < n; i++) {
-    quadPass(post.down, M[i], M[i - 1].tex, undefined, () => gl.uniform2f(post.down.uD, ...tx(M[i - 1])));
+    quadPass(post.down, M[i], [M[i - 1].tex], () => gl.uniform2f(post.down.uD, ...tx(M[i - 1])));
   }
   // ...and back up, adding each level into the one above it. That accumulation is what
   // gives a bright core with a wide, soft tail instead of one uniform blur radius.
   gl.enable(gl.BLEND);
   gl.blendFunc(gl.ONE, gl.ONE);
   for (let i = n - 2; i >= 0; i--) {
-    quadPass(post.up, M[i], M[i + 1].tex, undefined, () => gl.uniform2f(post.up.uD, ...tx(M[i + 1])));
+    quadPass(post.up, M[i], [M[i + 1].tex], () => gl.uniform2f(post.up.uD, ...tx(M[i + 1])));
   }
   gl.disable(gl.BLEND);
+  // ambient occlusion from scene depth — the contact darkening that stops props floating
+  if (post.ao && post.scene.depth) {
+    quadPass(post.ssao, post.ao, [post.scene.depth], () => {
+      gl.uniform3f(post.ssao.uK, 6, 190, AO_RADIUS);
+      gl.uniform2f(post.ssao.uD, 1 / post.w, 1 / post.h);
+    });
+  }
   // separate soft copy of the WHOLE scene (not just the bright bits) for the tilt-shift
-  quadPass(post.down, post.dofA, post.scene.tex, undefined, () => gl.uniform2f(post.down.uD, 1 / post.w, 1 / post.h));
-  quadPass(post.down, post.dofB, post.dofA.tex, undefined, () => gl.uniform2f(post.down.uD, ...tx(post.dofA)));
-  quadPass(post.comp, null, post.scene.tex, M[0].tex, () => {
+  quadPass(post.down, post.dofA, [post.scene.tex], () => gl.uniform2f(post.down.uD, 1 / post.w, 1 / post.h));
+  quadPass(post.down, post.dofB, [post.dofA.tex], () => gl.uniform2f(post.down.uD, ...tx(post.dofA)));
+  const aoTex = post.ao ? post.ao.tex : post.white;
+  quadPass(post.comp, null, [post.scene.tex, M[0].tex, post.dofB.tex, aoTex], () => {
     gl.uniform2f(post.comp.uP, EXPOSURE, BLOOM);
     gl.uniform3f(post.comp.uG, DOF_Y, DOF_NEAR, DOF_FALL);
-  }, post.dofB.tex);
+    gl.uniform3f(post.comp.uA, streak, playerUV[0], playerUV[1]);
+    gl.uniform1f(post.comp.uAO, post.ao ? AO_STRENGTH : 0);
+  });
   gl.enable(gl.DEPTH_TEST);
   gl.useProgram(prog);
   bindSceneAttribs();
@@ -1015,10 +1161,26 @@ function burst3(trackX, dzPx, n, hex, opts) {
     parts3.push({
       x: trackX / PXU + rnd(-0.3, 0.3), y: rnd(0.5, 1.3), z: -dzPx / PXU + rnd(-0.3, 0.3),
       vx: Math.cos(a) * sp, vy: rnd(2, 6.5), vz: Math.sin(a) * sp * 0.6 + (opts.back ? 3 : 0),
-      ry: rnd(TAU), vr: rnd(-9, 9), s: rnd(0.07, 0.19), tint,
+      ry: rnd(TAU), vr: rnd(-9, 9), s: opts.s ? rnd(opts.s * 0.55, opts.s * 1.5) : rnd(0.07, 0.19), tint,
       t: 0, life: opts.life || rnd(0.4, 0.9),
     });
   }
+}
+// DESTRUCTIBLES. Whatever you hit comes apart into the voxels it was built from, in its own
+// colours, and the pieces bounce and tumble. A crash should look like an event, not a stop.
+const DEBRIS = {
+  car: ['#AEDCEE', '#26262B', '#FF3A3A', '#F0F0F0'],
+  cop: ['#F1F4FA', '#2B2B33', '#FF4757', '#3D6DEB'],
+  barrier: ['#F2761B', '#F5EFDF', '#7A5230', '#F2761B'],
+};
+function shatter(e) {
+  const cols = DEBRIS[e.type] || DEBRIS.barrier;
+  const pal = e.type === 'car' && e.col ? [e.col, e.col, ...cols] : cols;
+  const dz = e.y - run.traveled;
+  for (let i = 0; i < 26; i++) {
+    burst3(e.x + rnd(-46, 46), -dz + rnd(-40, 40), 1, pal[i % pal.length], { life: rnd(0.8, 1.7), s: 0.26 });
+  }
+  shake = Math.max(shake, 14);
 }
 function updateParts3(dt) {
   for (let i = parts3.length - 1; i >= 0; i--) {
@@ -1064,10 +1226,26 @@ function makePlace(corner, traveled) {
 
 // ---------- world renderer ----------
 let fovCur = 57, glOK = false, glowTilt = -1.15;
+// NEAR-MISS CINEMATIC. Squeeze past a car and the world goes briefly slow and streaky while
+// you stay sharp. Costs almost nothing (the composite was already resampling the scene) and
+// it is the single best clip-generator in the game — it turns a skilled dodge into a moment.
+let cine = 0, streak = 0, playerUV = [0.5, 0.25];
+const MASTER_VOL = 0.55;
+function nearMissCine(combo) {
+  cine = Math.min(0.9, 0.5 + combo * 0.07);
+  if (master && actx) { // duck the mix, then let it swell back — mute lives at the sources
+    master.gain.cancelScheduledValues(actx.currentTime);
+    master.gain.setTargetAtTime(MASTER_VOL * 0.4, actx.currentTime, 0.02);
+    master.gain.setTargetAtTime(MASTER_VOL, actx.currentTime + 0.22, 0.12);
+  }
+}
 function renderWorld(o) {
   if (!gl) return;
   glOK = true;
-  const tod = TIMES[0]; // daytime-only for now (sunset/night shelved with the headlight)
+  // TIME OF DAY. Sun, sky, fog, ambient, point-light gain, streetlamps and wet asphalt are
+  // all driven off one index — which is what makes the night stage worth having: the lights
+  // that were decoration in daylight become the only thing lighting the street.
+  const tod = TIMES[todIdx(o.lvl || 1)];
   const sky = col3(tod.sky);
   // route transform (straight stages for now; the bend machinery idles)
   const place = makePlace(o.corner || null, o.traveled);
@@ -1076,8 +1254,8 @@ function renderWorld(o) {
   // edges and read like a phone camera; a ~30deg lens from 48u keeps edges near-parallel
   // and gives the diorama-under-glass look the reference has.
   const pw = pp0.x;
-  const fovTarget = 36 + (o.boost ? 3 : 0);
-  fovCur = lerp(fovCur, fovTarget, 0.1);
+  const fovTarget = 36 + (o.boost ? 3 : 0) + cine * 5; // lens punches out on a near miss
+  fovCur = lerp(fovCur, fovTarget, cine > 0.05 ? 0.28 : 0.1);
   const jx = shake > 0 ? rnd(-shake, shake) / 90 : 0;
   const jy = shake > 0 ? rnd(-shake, shake) / 110 : 0;
   const eye = [pw * 0.16 + jx, 40 + jy, 12];
@@ -1086,10 +1264,16 @@ function renderWorld(o) {
   const up = [Math.sin(-worldRot * 0.3), 1, 0];
   const proj = mPersp(fovCur * Math.PI / 180, glc.width / Math.max(1, glc.height), 6, 190);
   lastVP = mMul(proj, mLookAt(eye, cen, up));
+  // the streak radiates FROM the scooter, so post needs to know where it landed on screen
+  const puv = project(pp0.x, 0.9, pp0.z);
+  if (puv) playerUV = [clamp(puv.x / W, 0, 1), clamp(1 - puv.y / H, 0, 1)];
+  streak = cine + (o.boost && !o.player?.crash ? 0.22 : 0);
   const t = o.t, traveled = o.traveled;
   const turns = o.turns || [];
   const SEG_PX = SEG_LEN * PXU; // 192
   const nearTurnPx = p2 => turns.some(tn => Math.abs(tn.m * M2PX - p2) < 280);
+
+  const k0 = Math.floor((traveled - 320) / SEG_PX); // first road segment in view
 
   // ---- all opaque geometry. Runs TWICE: once from the sun into the depth map, once from
   // the camera. PASS tells drawModel which program and matrix it is feeding.
@@ -1097,7 +1281,6 @@ function renderWorld(o) {
   // ground continues under the haze (no horizon at this pitch)
   drawModel(MOD.farground, 0, 0, -60, { noCast: true });
   // road segments + roadside plots
-  const k0 = Math.floor((traveled - 320) / SEG_PX);
   for (let k = k0; k < k0 + 31; k++) {
     const segpx = k * SEG_PX + SEG_PX / 2;
     if (nearTurnPx(segpx)) continue;
@@ -1106,7 +1289,10 @@ function renderWorld(o) {
     for (let side = 0; side < 2; side++) {
       const v = Math.floor(hash(k * 2 + side + 7) * MOD.plots.length);
       const pq = place(segpx, side ? PLOT_X : -PLOT_X);
-      drawModel(MOD.plots[v], pq.x, 0, pq.z, { ry: pq.yaw });
+      // The plot's road-facing side is its local -x. On the LEFT of the street that points
+      // AWAY from the road, so every left-hand building had its windows, door and awning on
+      // the wrong face. Spin them 180 so both sides of the street actually face the player.
+      drawModel(MOD.plots[v], pq.x, 0, pq.z, { ry: pq.yaw + (side ? 0 : Math.PI) });
     }
   }
   // 4-way fillers at the active corner: the straight-ahead street + the wrong arm
@@ -1119,7 +1305,7 @@ function renderWorld(o) {
         for (let side = 0; side < 2; side++) {
           const v = Math.floor(hash(j * 5 + side * 3 + mode * 11) * MOD.plots.length);
           const pq = place(sF, side ? PLOT_X : -PLOT_X, mode);
-          drawModel(MOD.plots[v], pq.x, 0, pq.z, { ry: pq.yaw });
+          drawModel(MOD.plots[v], pq.x, 0, pq.z, { ry: pq.yaw + (side ? 0 : Math.PI) });
         }
       }
     }
@@ -1251,6 +1437,52 @@ function renderWorld(o) {
   gl.uniform3f(loc.uEye, eye[0], eye[1], eye[2]);
   gl.uniform2f(loc.uFog, tod.fogN, tod.fogF);
   gl.uniform3fv(loc.uFogCol, sky);
+  gl.uniform1f(loc.uWet, tod.wet);
+
+  // ---- collect the point lights that can reach the player, nearest 8 win
+  const pt = tod.pt;
+  if (pt > 0.01) {
+    for (const e of (o.entities || [])) {
+      const dz = e.y - traveled;
+      if (dz < -200 || dz > 2200) continue;
+      const pp = place(e.y, e.x);
+      if (e.type === 'stick') {
+        const yb = 0.72 + Math.sin(t * 4 + e.y * 0.02) * 0.1;
+        addLight(pp.x, yb, pp.z, 4.4, L_GOLD, 1.5 * pt * (0.85 + Math.sin(t * 6 + e.y * 0.03) * 0.15));
+      } else if (e.type === 'car') {
+        addLight(pp.x, 0.55, pp.z + 1.5, 3.0, L_RED, 0.9 * pt);
+      } else if (e.type === 'cop') {
+        const ph2 = Math.floor(t * 5) % 2;
+        addLight(pp.x, 1.5, pp.z, 6.5, ph2 ? L_RED : L_BLUE, 2.4 * pt);
+      } else if (e.type === 'barrier' && Math.floor(t * 3 + e.y * 0.01) % 2) {
+        addLight(pp.x, 1.32, pp.z, 3.6, L_GOLD, 1.2 * pt);
+      }
+    }
+    if (tod.lamp) { // streetlamps: bulbs live inside the plot models, so dig their positions out
+      for (let k = k0; k < k0 + 31; k++) {
+        const segpx = k * SEG_PX + SEG_PX / 2;
+        if (nearTurnPx(segpx)) continue;
+        for (let side = 0; side < 2; side++) {
+          const lamp = plotLamps[Math.floor(hash(k * 2 + side + 7) * MOD.plots.length)];
+          if (!lamp) continue;
+          const pq = place(segpx, side ? PLOT_X : -PLOT_X);
+          const mir = side ? 1 : -1; // left plots are spun 180, so their locals mirror
+          const lz = pq.z + lamp.z * mir;
+          if (lz < -42 || lz > 10) continue;
+          addLight(pq.x + lamp.x * mir, lamp.y, lz, 8.0, L_LAMP, 1.35 * pt);
+        }
+      }
+    }
+    if (o.boost && o.player && !o.player.crash) {
+      addLight(pp0.x, 0.4, pp0.z + 1.5, 4.0, L_FIRE, 1.6 * pt * (0.7 + Math.sin(t * 30) * 0.3));
+    }
+    if (o.player && o.player.crash) {
+      const cf = Math.max(0, 1 - o.player.crash.rx / 5);
+      addLight(pp0.x, 0.9, pp0.z - o.player.crash.dz, 9, L_FIRE, 4.0 * cf);
+    }
+  }
+  uploadLights(pp0.x, pp0.z);
+
   drawGeo();
 
   // ---- glow pass: additive HDR light. No depth test — light never gets clipped by geometry.
@@ -1268,6 +1500,24 @@ function renderWorld(o) {
   const glow = (x, y, z, s, tint, i) => drawModel(MOD.disc, x, y, z, { s, tint, emis: i, rx: glowTilt });
   const pool = (x, z, s, tint, i) => drawModel(MOD.disc, x, 0.05, z, { s, tint, emis: i, rx: -Math.PI / 2 });
   const HOT_RED = [1.0, 0.10, 0.05], HOT_BLUE = [0.16, 0.30, 1.0], GOLDY = [1.0, 0.66, 0.16], FIRE = [1.0, 0.42, 0.10];
+  // volumetric beams under the streetlamps — lit air, only worth drawing when it's dark
+  if (tod.lamp) {
+    const beam = (x, y, z, r, hgt, tint, i) =>
+      drawModel(MOD.cone3, x, y, z, { s: [r, hgt, r], tint, emis: i });
+    for (let k = k0; k < k0 + 31; k++) {
+      const segpx = k * SEG_PX + SEG_PX / 2;
+      if (nearTurnPx(segpx)) continue;
+      for (let side = 0; side < 2; side++) {
+        const lamp = plotLamps[Math.floor(hash(k * 2 + side + 7) * MOD.plots.length)];
+        if (!lamp) continue;
+        const pq = place(segpx, side ? PLOT_X : -PLOT_X);
+        const mir = side ? 1 : -1;
+        const lz = pq.z + lamp.z * mir;
+        if (lz < -40 || lz > 8) continue;
+        beam(pq.x + lamp.x * mir, lamp.y, lz, 2.1, lamp.y, L_LAMP, 0.11 * tod.pt);
+      }
+    }
+  }
   for (const e of (o.entities || [])) {
     const dz = e.y - traveled;
     if (dz < -280 || dz > 2800) continue;
@@ -1326,7 +1576,7 @@ function initAudio() {
   try {
     actx = new (window.AudioContext || window.webkitAudioContext)();
     master = actx.createGain();
-    master.gain.value = 0.55;
+    master.gain.value = MASTER_VOL;
     master.connect(actx.destination);
     startMusic();
   } catch (e) { actx = null; }
@@ -1904,6 +2154,7 @@ function updatePlay(dt) {
         run.score += 5 * player.combo;
         popAtPlayer('NEAR MISS ×' + player.combo, '#7AE0FF', 0.9);
         sfx.near(player.combo);
+        nearMissCine(player.combo);
         if (player.combo >= 3 && Math.random() < 0.3) tony('near');
       }
     }
@@ -1918,7 +2169,7 @@ function updatePlay(dt) {
             const lost = Math.min(3, run.sticks);
             if (lost > 0) { run.sticks -= lost; popAtPlayer('-' + lost + ' 🥖!', '#FF8A80', 0.85); }
           }
-        } else if (!GOD) { startCrash(); return; }
+        } else if (!GOD) { shatter(e); startCrash(); return; }
       }
     }
   }
@@ -2575,6 +2826,10 @@ function frame(ts) {
   last = t;
   if (dt <= 0 || dt > 0.25) dt = 0.016;
   dt = Math.min(dt, 0.033);
+  // near-miss slow-mo. The cinematic itself decays in REAL time; everything else runs on
+  // the dilated clock, so the whole world drags while the effect plays out.
+  cine = Math.max(0, cine - dt / 0.55);
+  dt *= 1 - 0.42 * cine * cine;
   tGlobal += dt;
   stateT += dt;
   buttons = [];

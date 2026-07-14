@@ -293,9 +293,9 @@ function buildRoadSeg() {
     [5.15, 0.02, 0, 2.7, 0.16, SEG_LEN, P_WALK],
     [-10.4, -0.02, 0, 8.2, 0.1, SEG_LEN, P_SAND],       // sand beyond the sidewalks
     [10.4, -0.02, 0, 8.2, 0.1, SEG_LEN, P_SAND],
-    // subtle asphalt patchwork (always darker than the road)
-    [1.1, -0.045, -0.8, 1.6, 0.13, 1.4, '#444A5B'],
-    [-1.6, -0.045, 1.2, 1.3, 0.13, 1.1, '#41475A'],
+    // subtle asphalt patchwork (barely darker than the road)
+    [1.1, -0.045, -0.8, 1.3, 0.13, 1.1, '#484E5F'],
+    [-1.6, -0.045, 1.2, 1.0, 0.13, 0.9, '#474D5E'],
   ];
   // ...with green blocks placed periodically (reference style)
   for (const cz of [-1.1, 0.9]) {
@@ -469,12 +469,32 @@ function buildModels() {
     [0.16, 0.74, 0.11, 0.17, 0.17, 0.06, '#B5303A'],
     [0, 0.5, 0.1, 0.15, 0.15, 0.06, '#B5303A'],
   ]);
+  // chunky lying breadstick (reference style) — drawn EMISSIVE so it glows by itself
   MOD.stick = voxModel([
-    [0, 0.42, 0, 0.22, 0.8, 0.22, '#D9A05B'],
-    [-0.05, 0.62, 0.12, 0.08, 0.08, 0.04, '#F7E0B8'],
-    [0.06, 0.42, 0.12, 0.08, 0.08, 0.04, '#F7E0B8'],
-    [-0.04, 0.22, 0.12, 0.08, 0.08, 0.04, '#F7E0B8'],
+    [0, 0, 0, 1.05, 0.3, 0.36, '#E8B558'],
+    [-0.58, 0, 0, 0.16, 0.24, 0.3, '#D9A04B'],
+    [0.58, 0, 0, 0.16, 0.24, 0.3, '#D9A04B'],
+    [-0.3, 0.17, 0, 0.18, 0.12, 0.32, '#F4CC7E'],
+    [0.02, 0.17, 0, 0.18, 0.12, 0.32, '#F4CC7E'],
+    [0.34, 0.17, 0, 0.18, 0.12, 0.32, '#F4CC7E'],
   ]);
+  // flashlight beam: flat gradient wedge, hot at the lamp, fading out
+  {
+    const bv = [];
+    const q = (x, z, c) => bv.push(x, 0, z, 0, 1, 0, c, c, c);
+    const tri = (a, b, c2) => { q(a[0], a[1], a[2]); q(b[0], b[1], b[2]); q(c2[0], c2[1], c2[2]); };
+    const O = [0, 0, 1], L1 = [-0.26, -0.45, 0.42], C1 = [0, -0.45, 0.6], R1 = [0.26, -0.45, 0.42];
+    const L2 = [-0.5, -1, 0], C2 = [0, -1, 0.06], R2 = [0.5, -1, 0];
+    tri(O, L1, C1); tri(O, C1, R1);
+    tri(L1, L2, C2); tri(L1, C2, C1);
+    tri(C1, C2, R2); tri(C1, R2, R1);
+    if (gl) {
+      const vbo = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(bv), gl.STATIC_DRAW);
+      MOD.beam2 = { vbo, count: bv.length / 9 };
+    } else MOD.beam2 = { count: 0 };
+  }
   MOD.pothole = voxModel([
     [0, 0.014, 0, 1.05, 0.028, 0.72, '#3A3E4A'],
     [0, 0.03, 0, 0.72, 0.028, 0.46, '#181A21'],
@@ -703,7 +723,7 @@ function makePlace(corner, traveled) {
 }
 
 // ---------- world renderer ----------
-let fovCur = 57, glOK = false;
+let fovCur = 57, glOK = false, glowTilt = -1.15;
 function renderWorld(o) {
   if (!gl) return;
   glOK = true;
@@ -724,12 +744,13 @@ function renderWorld(o) {
   const pp0 = place(o.traveled, o.px); // player's rendered position
   // top-down chase camera (reference style: steep pitch, ground fills the frame)
   const pw = pp0.x;
-  const fovTarget = 52 + (o.boost ? 5 : 0);
+  const fovTarget = 55 + (o.boost ? 5 : 0);
   fovCur = lerp(fovCur, fovTarget, 0.1);
   const jx = shake > 0 ? rnd(-shake, shake) / 90 : 0;
   const jy = shake > 0 ? rnd(-shake, shake) / 110 : 0;
-  const eye = [pw * 0.16 + jx, 26 + jy, 3.0];
-  const cen = [pw * 0.22 + jx, 0, -5.8];
+  const eye = [pw * 0.16 + jx, 24.5 + jy, 5.6];
+  const cen = [pw * 0.22 + jx, 0, -5.4];
+  glowTilt = -Math.atan2(eye[1] - cen[1], eye[2] - cen[2]); // billboards face THIS camera
   const up = [Math.sin(-worldRot * 0.3), 1, 0];
   const proj = mPersp(fovCur * Math.PI / 180, glc.width / Math.max(1, glc.height), 3, 110);
   lastVP = mMul(proj, mLookAt(eye, cen, up));
@@ -818,8 +839,13 @@ function renderWorld(o) {
       drawModel(MOD.shadow, x, 0.03, z, { s: [0.7, 1, 0.7] });
       drawModel(MOD.slice, x, 0.55 + Math.sin(t * 4 + e.y * 0.02) * 0.12, z, { ry: t * 2.4 + e.y * 0.01, tint: [1.18, 1.12, 1.0] });
     } else if (e.type === 'stick') {
-      drawModel(MOD.shadow, x, 0.03, z, { s: [0.5, 1, 0.5] });
-      drawModel(MOD.stick, x, 0.55 + Math.sin(t * 4 + e.y * 0.02) * 0.12, z, { ry: t * 2.4, rz: 0.25, tint: [1.2, 1.12, 0.98] });
+      drawModel(MOD.shadow, x, 0.03, z, { s: [0.85, 1, 0.55] });
+      // self-lit: bypass scene lighting so the stick itself glows, day or night
+      gl.uniform1f(loc.uAmb, 1);
+      gl.uniform3fv(loc.uLightCol, WHITE_TINT);
+      drawModel(MOD.stick, x, 0.72 + Math.sin(t * 4 + e.y * 0.02) * 0.1, z, { ry: t * 1.8 + e.y * 0.01, rz: 0.1, s: 1.3, tint: [1.3, 1.12, 0.62] });
+      gl.uniform1f(loc.uAmb, tod.amb);
+      gl.uniform3fv(loc.uLightCol, tod.light);
     } else if (e.type === 'trap') {
       const pb2 = place(e.y, 0);
       if (Math.floor(t * 4) % 2 === 0) drawModel(MOD.beam, pb2.x, 0.55, pb2.z, { ry: pb2.yaw });
@@ -857,30 +883,31 @@ function renderWorld(o) {
   for (const p of parts3) {
     drawModel(MOD.cube, p.x, p.y, p.z, { s: p.s, ry: p.ry, tint: p.tint });
   }
-  // ---- glow pass: additive gradient discs on pickups, chevrons, sun ----
+  // ---- glow pass: additive light. No depth test — light never gets clipped by geometry.
   gl.depthMask(false);
+  gl.disable(gl.DEPTH_TEST);
   gl.disable(gl.CULL_FACE);
   gl.enable(gl.BLEND);
   gl.blendFunc(gl.ONE, gl.ONE);
   gl.uniform1f(loc.uAmb, 1);
   gl.uniform3f(loc.uLightCol, 1, 1, 1);
   gl.uniform2f(loc.uFog, 9999, 10000); // fog would lift the black disc rims to sky color
-  const CAMTILT = -0.29; // face the chase camera
-  const glow = (x, y, z, s, tint) => drawModel(MOD.disc, x, y, z, { s, tint, rx: CAMTILT });
+  const glow = (x, y, z, s, tint) => drawModel(MOD.disc, x, y, z, { s, tint, rx: glowTilt });
   for (const e of (o.entities || [])) {
     const dz = e.y - traveled;
     if (dz < -280 || dz > 2800) continue;
     const pp = place(e.y, e.x);
     if (e.type === 'stick') {
-      const yb = 0.95 + Math.sin(t * 4 + e.y * 0.02) * 0.12;
+      const yb = 0.72 + Math.sin(t * 4 + e.y * 0.02) * 0.1;
       const pulse = (0.8 + Math.sin(t * 6 + e.y * 0.03) * 0.2) * clamp(dz / 380, 0.12, 1);
-      glow(pp.x, yb - 0.25, pp.z, 2.5, [0.95 * pulse, 0.7 * pulse, 0.24 * pulse]);
+      glow(pp.x, yb, pp.z, 2.9, [0.85 * pulse, 0.62 * pulse, 0.2 * pulse]);
+      glow(pp.x, yb, pp.z, 1.3, [0.6 * pulse, 0.48 * pulse, 0.18 * pulse]); // hot inner halo
       // warm pool on the road beneath it
-      drawModel(MOD.disc, pp.x, 0.05, pp.z, { s: [2.0, 1, 1.5], rx: -Math.PI / 2, tint: [0.4 * pulse, 0.3 * pulse, 0.1 * pulse] });
+      drawModel(MOD.disc, pp.x, 0.05, pp.z, { s: [2.4, 1, 1.7], rx: -Math.PI / 2, tint: [0.38 * pulse, 0.28 * pulse, 0.09 * pulse] });
       // twin orbiting sparkles (reference has little + twinkles around the breadstick)
       const oa = t * 3.2 + e.y * 0.05;
-      glow(pp.x + Math.cos(oa) * 0.85, yb + 0.15 + Math.sin(oa * 1.7) * 0.3, pp.z + Math.sin(oa) * 0.4, 0.45, [0.85 * pulse, 0.7 * pulse, 0.32 * pulse]);
-      glow(pp.x - Math.cos(oa * 0.8) * 0.8, yb - 0.1 + Math.cos(oa * 1.3) * 0.3, pp.z - Math.sin(oa * 0.8) * 0.4, 0.35, [0.75 * pulse, 0.62 * pulse, 0.28 * pulse]);
+      glow(pp.x + Math.cos(oa) * 0.95, yb + 0.15 + Math.sin(oa * 1.7) * 0.3, pp.z + Math.sin(oa) * 0.4, 0.42, [0.9 * pulse, 0.74 * pulse, 0.34 * pulse]);
+      glow(pp.x - Math.cos(oa * 0.8) * 0.9, yb - 0.1 + Math.cos(oa * 1.3) * 0.3, pp.z - Math.sin(oa * 0.8) * 0.4, 0.34, [0.8 * pulse, 0.66 * pulse, 0.3 * pulse]);
     } else if (e.type === 'car') { // glowing taillights (reference)
       glow(pp.x - 0.48, 0.55, pp.z + 1.42, 0.55, [0.9, 0.14, 0.1]);
       glow(pp.x + 0.48, 0.55, pp.z + 1.42, 0.55, [0.9, 0.14, 0.1]);
@@ -902,10 +929,10 @@ function renderWorld(o) {
   if (o.player) {
     const night = ((o.lvl || 1) - 1) % 3 === 2;
     if (night && !o.player.crash) {
-      // real headlight: a hot lamp + warm light pooling on the asphalt ahead
-      glow(pp0.x, 0.62, pp0.z - 0.85, 0.7, [0.95, 0.88, 0.6]);
-      drawModel(MOD.disc, pp0.x, 0.05, pp0.z - 2.4, { s: [2.2, 1, 4.4], rx: -Math.PI / 2, tint: [0.34, 0.31, 0.19] });
-      drawModel(MOD.disc, pp0.x, 0.05, pp0.z - 5.4, { s: [3.4, 1, 5.0], rx: -Math.PI / 2, tint: [0.15, 0.14, 0.09] });
+      // real flashlight: hot blooming lamp + a gradient beam cone on the asphalt + far pool
+      glow(pp0.x, 0.55, pp0.z - 0.95, 0.8, [1.15, 1.05, 0.72]);
+      drawModel(MOD.beam2, pp0.x, 0.06, pp0.z - 0.95, { s: [2.7, 1, 8.8], tint: [0.72, 0.66, 0.44] });
+      drawModel(MOD.disc, pp0.x, 0.06, pp0.z - 9.2, { s: [4.2, 1, 2.8], rx: -Math.PI / 2, tint: [0.2, 0.185, 0.12] });
     }
     if (o.boost && !o.player.crash) {
       const fk = 0.7 + Math.sin(t * 30) * 0.3;
@@ -920,6 +947,7 @@ function renderWorld(o) {
   }
   gl.disable(gl.BLEND);
   gl.enable(gl.CULL_FACE);
+  gl.enable(gl.DEPTH_TEST);
   gl.depthMask(true);
   if (post && post.scene) runPost();
 }

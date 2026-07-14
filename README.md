@@ -1,6 +1,6 @@
 # 🍕 Tony's Delivery Service
 
-A frantic, one-thumb, portrait-mode 3-lane pizza delivery runner. You're Tony's delivery boy: follow the GPS, dodge traffic, keep the pizza hot, and don't miss your turn — or it's the long way around.
+A frantic, one-thumb, portrait-mode 3-lane pizza delivery runner. You're Tony's delivery boy: beat the clock, grab every breadstick, and don't hit ANYTHING — one crash and the pizza's on the pavement.
 
 **Play:** https://shreyasthiagaraj.github.io/tonys-delivery-service/ (best on a phone, portrait) — or just open `index.html` in any browser.
 
@@ -8,29 +8,27 @@ A frantic, one-thumb, portrait-mode 3-lane pizza delivery runner. You're Tony's 
 
 | Input | Action |
 |---|---|
-| Swipe ← / → (or arrow keys / A / D) | Change lanes; swipe toward the GPS arrow at an intersection to make the turn |
-| Press & hold (or ↑ / W / Space) | Boost — arrive faster, pizza stays hotter, tip gets bigger |
+| Swipe ← / → (or arrow keys / A / D) | Move exactly ONE lane per swipe; a held pan steps lane-by-lane with a settle pause between steps |
+| Press & hold (or ↑ / W / Space) | Boost — the only way to beat tight clocks |
 | Tap ⏸ / P / Esc | Pause |
 | M | Mute |
 
 ## Core loop
 
-1. **Take an order** — customer, address, and a mini route map showing the turns ahead.
-2. **Ride** — dodge cars, parked cop cars, roadwork barriers, and potholes. Boosting through a **speed trap** gets you fined.
-3. **Follow the GPS** — swipe with the arrow inside the intersection window to turn. Miss it and the route gets longer ("RECALCULATING…").
-4. **Collect** — 8 pizza slices fill the pizza meter → a whole pie = +200 and an extra pizza box (a life, max 3). Breadsticks are the persistent currency.
-5. **Deliver** — tip = base fee + hot-pizza bonus + whole pies + best near-miss combo − missed turns. 1–3 stars. Next order is longer and faster.
+1. **Take an order** — customer, address, distance, and a delivery deadline.
+2. **Beat the clock** — a countdown timer is the run; boost banks time, and the last 5 seconds tick audibly.
+3. **Collect breadsticks** — the only pickup and the persistent currency; trails double as steering guidance.
+4. **Don't hit anything** — one collision ends the run with a slow-tumble crash animation (cars/cops/barriers). Potholes just stumble you and shake loose a few breadsticks; boosting past a speed trap costs sticks.
+5. **Stars (1–3)** at delivery from a blend of time remaining and breadsticks collected vs. available. Fail states: PIZZA DOWN (crash) or PIZZA'S COLD (timeout) — the revive slot offers a restart-in-place or +15 seconds for 🥖30.
 
-Crashes cost a pizza box; lose all three and it's PIZZA DOWN (revive once per run for 🥖30 — this slot is the future rewarded-ad placement). Near misses build a combo with rising-pitch SFX — the fastest way to build score.
-
-Tony shouts from the corner ("MAMMA MIA!", "the OTHER left!") via speech bubbles and, where the browser supports it, an actual Italian `it-IT` voice through the Web Speech API.
+Stages are straight for now — the core game and visuals come first; turns return later.
 
 ## Design decisions
 
-- **3D voxel style** (Crossy Road family): a hand-rolled WebGL renderer — zero libraries — draws box-list voxel models with per-face shading, one neutral-white directional light, and far atmospheric fog (~120 units) with a distant skyline + sun/moon as a free skybox (the camera never moves in z; the world scrolls past it). All models are code: scooter + rider + pizza box, cars, cop cars with alternating light bars, striped barriers, glowing voxel pizza slices and breadsticks (additive gradient-disc fake bloom), procedural buildings, green curbs and sand grounds in bright natural colors.
-- **Real turns**: the route is an L-shaped path — the road visibly bends 90° at the intersection ahead (with straight-ahead and wrong-arm filler streets making a true 4-way), and taking the turn sweeps the player's heading smoothly while the whole world rotates around the centered player. Implemented as a fixed-frame path transform (`makePlace`), not a camera trick.
-- **2D HUD overlay** on a second canvas: pizza wheel, pizza-box lives, breadstick wallet, GPS pill, route-progress bar (scooter dot → pin with turn tick marks), heat bar, and Tony's speech bubble. Crisp at any DPI.
-- **Italian-flag palette** — Tony Red `#E63946`, Basil Green `#2A9D5C`, Cheese Gold `#FFC93F`, Mozzarella Cream `#FFF6E3` over warm terracotta streets.
+- **Top-down voxel style** (reference-driven): a hand-rolled WebGL renderer — zero libraries — draws box-list voxel models under a steep chase camera (~72° pitch, ground fills the frame, no horizon). Neutral-white light, soft distance haze. All models are code: scooter + rider + pizza box, cars with glass cabins and glowing taillights, cop cars with alternating light bars, striped barriers, glowing breadsticks, palms, market stalls with green awnings, green curb blocks on stone sidewalks over orange sand.
+- **Real bloom post-processing**: scene renders to a framebuffer, a luminance bright-pass extracts highlights at quarter res, two-pass Gaussian blur, additive composite with a soft vignette. Deliberate emissives (taillight/light-bar/blinker/boost-flame glow discs, breadstick halos with orbiting sparkles) feed the bloom; the scooter leaves a trail of white cross-shaped exhaust puffs on the road.
+- **2D HUD overlay** on a second canvas, reference-styled: gold pizza medallion, breadstick pill, countdown timer pill (green→amber→pulsing red), gold route-progress bar (scooter dot → pin), chunky centered score, Tony's speech bubble, rounded-square pause. Crisp at any DPI.
+- **Italian-flag palette** — Tony Red `#E63946`, Basil Green `#2A9D5C`, Cheese Gold `#FFC93F`, Mozzarella Cream `#FFF6E3` over desert sand and blue-grey asphalt.
 - **All audio is synthesized** — WebAudio step-sequencer plays a tarantella-flavored loop (tempo rises with level); SFX are synth blips/noise bursts. No audio files.
 - **Levels are deliveries** — 20–60 second runs (hyper-casual sweet spot), death→retry is one tap, first delivery opens fail-proof (research: player must understand success within 10s).
 - **Time-of-day cycling** — day / sunset / night sky, fog, and lighting every 3 levels (night adds a headlight pool) for visual variety in clips.

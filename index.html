@@ -735,7 +735,7 @@ function renderWorld(o) {
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, glc.width, glc.height);
   }
-  const tod = TIMES[((o.lvl || 1) - 1) % 3];
+  const tod = TIMES[0]; // daytime-only for now (sunset/night shelved with the headlight)
   const sky = col3(tod.sky);
   gl.clearColor(sky[0], sky[1], sky[2], 1);
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
@@ -843,7 +843,7 @@ function renderWorld(o) {
       // self-lit: bypass scene lighting so the stick itself glows, day or night
       gl.uniform1f(loc.uAmb, 1);
       gl.uniform3fv(loc.uLightCol, WHITE_TINT);
-      drawModel(MOD.stick, x, 0.72 + Math.sin(t * 4 + e.y * 0.02) * 0.1, z, { ry: t * 1.8 + e.y * 0.01, rz: 0.1, s: 1.3, tint: [1.3, 1.12, 0.62] });
+      drawModel(MOD.stick, x, 0.72 + Math.sin(t * 4 + e.y * 0.02) * 0.1, z, { ry: t * 1.8 + e.y * 0.01, rz: 0.1, s: 1.3, tint: [1.16, 1.04, 0.6] });
       gl.uniform1f(loc.uAmb, tod.amb);
       gl.uniform3fv(loc.uLightCol, tod.light);
     } else if (e.type === 'trap') {
@@ -900,14 +900,14 @@ function renderWorld(o) {
     if (e.type === 'stick') {
       const yb = 0.72 + Math.sin(t * 4 + e.y * 0.02) * 0.1;
       const pulse = (0.8 + Math.sin(t * 6 + e.y * 0.03) * 0.2) * clamp(dz / 380, 0.12, 1);
-      glow(pp.x, yb, pp.z, 2.9, [0.85 * pulse, 0.62 * pulse, 0.2 * pulse]);
-      glow(pp.x, yb, pp.z, 1.3, [0.6 * pulse, 0.48 * pulse, 0.18 * pulse]); // hot inner halo
+      glow(pp.x, yb, pp.z, 2.2, [0.5 * pulse, 0.36 * pulse, 0.12 * pulse]);
+      glow(pp.x, yb, pp.z, 1.0, [0.36 * pulse, 0.29 * pulse, 0.11 * pulse]); // hot inner halo
       // warm pool on the road beneath it
-      drawModel(MOD.disc, pp.x, 0.05, pp.z, { s: [2.4, 1, 1.7], rx: -Math.PI / 2, tint: [0.38 * pulse, 0.28 * pulse, 0.09 * pulse] });
+      drawModel(MOD.disc, pp.x, 0.05, pp.z, { s: [1.9, 1, 1.4], rx: -Math.PI / 2, tint: [0.2 * pulse, 0.15 * pulse, 0.05 * pulse] });
       // twin orbiting sparkles (reference has little + twinkles around the breadstick)
       const oa = t * 3.2 + e.y * 0.05;
-      glow(pp.x + Math.cos(oa) * 0.95, yb + 0.15 + Math.sin(oa * 1.7) * 0.3, pp.z + Math.sin(oa) * 0.4, 0.42, [0.9 * pulse, 0.74 * pulse, 0.34 * pulse]);
-      glow(pp.x - Math.cos(oa * 0.8) * 0.9, yb - 0.1 + Math.cos(oa * 1.3) * 0.3, pp.z - Math.sin(oa * 0.8) * 0.4, 0.34, [0.8 * pulse, 0.66 * pulse, 0.3 * pulse]);
+      glow(pp.x + Math.cos(oa) * 0.95, yb + 0.15 + Math.sin(oa * 1.7) * 0.3, pp.z + Math.sin(oa) * 0.4, 0.36, [0.7 * pulse, 0.58 * pulse, 0.26 * pulse]);
+      glow(pp.x - Math.cos(oa * 0.8) * 0.9, yb - 0.1 + Math.cos(oa * 1.3) * 0.3, pp.z - Math.sin(oa * 0.8) * 0.4, 0.3, [0.6 * pulse, 0.5 * pulse, 0.22 * pulse]);
     } else if (e.type === 'car') { // glowing taillights (reference)
       glow(pp.x - 0.48, 0.55, pp.z + 1.42, 0.55, [0.9, 0.14, 0.1]);
       glow(pp.x + 0.48, 0.55, pp.z + 1.42, 0.55, [0.9, 0.14, 0.1]);
@@ -925,15 +925,8 @@ function renderWorld(o) {
       }
     }
   }
-  // player lights: night headlight pool, boost flame, crash fireball
+  // player lights: boost flame, crash fireball (headlight shelved with night mode)
   if (o.player) {
-    const night = ((o.lvl || 1) - 1) % 3 === 2;
-    if (night && !o.player.crash) {
-      // real flashlight: hot blooming lamp + a gradient beam cone on the asphalt + far pool
-      glow(pp0.x, 0.55, pp0.z - 0.95, 0.8, [1.15, 1.05, 0.72]);
-      drawModel(MOD.beam2, pp0.x, 0.06, pp0.z - 0.95, { s: [2.7, 1, 8.8], tint: [0.72, 0.66, 0.44] });
-      drawModel(MOD.disc, pp0.x, 0.06, pp0.z - 9.2, { s: [4.2, 1, 2.8], rx: -Math.PI / 2, tint: [0.2, 0.185, 0.12] });
-    }
     if (o.boost && !o.player.crash) {
       const fk = 0.7 + Math.sin(t * 30) * 0.3;
       glow(pp0.x, 0.35, pp0.z + 1.45, 0.9, [0.8 * fk, 0.42 * fk, 0.1 * fk]);

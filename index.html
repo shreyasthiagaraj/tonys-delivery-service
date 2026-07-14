@@ -1470,9 +1470,21 @@ function updatePlay(dt) {
   const pw = 40, ph = 58;
   for (let i = entities.length - 1; i >= 0; i--) {
     const e = entities[i];
-    if (e.vy) e.y += e.vy * dt;
+    if (e.vy) {
+      // traffic sense: never rear-end the vehicle ahead in this lane
+      const blocked = entities.some(o2 => o2 !== e && DIMS[o2.type] && o2.type !== 'pothole' &&
+        Math.abs(o2.x - e.x) < 70 && o2.y > e.y && o2.y - e.y < 190);
+      if (!blocked) e.y += e.vy * dt;
+    }
     if (e.driftTo !== undefined) {
-      if (!e.drifting && e.y - run.traveled < 860) e.drifting = true;
+      if (!e.drifting && e.y - run.traveled < 860) {
+        // only change lanes if the target lane is actually clear
+        const tx2 = laneX(e.driftTo);
+        const clear = !entities.some(o2 => o2 !== e && DIMS[o2.type] && o2.type !== 'pothole' &&
+          Math.abs(o2.x - tx2) < 62 && Math.abs(o2.y - e.y) < 430);
+        if (clear) e.drifting = true;
+        else e.driftTo = undefined; // abort: stay in lane
+      }
       if (e.drifting && e.driftP < 1) {
         e.driftP = Math.min(1, e.driftP + dt / 1.4);
         e.x = lerp(laneX(e.lane), laneX(e.driftTo), e.driftP * e.driftP * (3 - 2 * e.driftP));

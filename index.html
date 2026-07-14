@@ -38,7 +38,15 @@ function hash(n) {
   n = ((n ^ (n >>> 13)) * 1274126177) | 0;
   return ((n ^ (n >>> 16)) >>> 0) / 4294967296;
 }
-function col3(hex) {
+// Every hex in this file is authored in sRGB. The renderer works in LINEAR light:
+// colors are decoded on the way in, and re-encoded once at the end of the post chain.
+// Lighting sRGB values directly (the old behaviour) is what made everything pastel.
+const s2l = c => c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+function col3(hex) { // -> LINEAR rgb, for the GPU
+  const n = parseInt(hex.slice(1), 16);
+  return [s2l(((n >> 16) & 255) / 255), s2l(((n >> 8) & 255) / 255), s2l((n & 255) / 255)];
+}
+function srgb3(hex) { // -> raw sRGB rgb, for the 2D canvas HUD
   const n = parseInt(hex.slice(1), 16);
   return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
 }
@@ -48,6 +56,14 @@ function shade(hex, f) {
   if (f < 0) { r *= 1 + f; g *= 1 + f; b *= 1 + f; }
   else { r += (255 - r) * f; g += (255 - g) * f; b += (255 - b) * f; }
   return 'rgb(' + (r | 0) + ',' + (g | 0) + ',' + (b | 0) + ')';
+}
+function shadeHex(hex, f) { // same, but hex out — voxel colors need '#rrggbb'
+  const num = parseInt(hex.slice(1), 16);
+  let r = (num >> 16) & 255, g = (num >> 8) & 255, b = num & 255;
+  if (f < 0) { r *= 1 + f; g *= 1 + f; b *= 1 + f; }
+  else { r += (255 - r) * f; g += (255 - g) * f; b += (255 - b) * f; }
+  const h = v => clamp(v | 0, 0, 255).toString(16).padStart(2, '0');
+  return '#' + h(r) + h(g) + h(b);
 }
 
 // ---------- palette ----------
@@ -59,10 +75,13 @@ const GOLD = '#FFC93F';
 const CRUST = '#C9803A';
 const FONT = "'Arial Rounded MT Bold','Hiragino Maru Gothic ProN','Nunito','Trebuchet MS','Segoe UI',system-ui,sans-serif";
 // world palette (voxel look) + time-of-day moods
-const TIMES = [ // day / sunset / night — top-down view: fog is a soft distance haze, no horizon
-  { sky: '#EFDDB9', fogN: 26, fogF: 64, amb: 0.78, light: [1.07, 1.05, 1.0] },
-  { sky: '#F2C89E', fogN: 24, fogF: 58, amb: 0.7, light: [1.1, 0.95, 0.78] },
-  { sky: '#333C74', fogN: 20, fogF: 50, amb: 0.52, light: [0.62, 0.67, 0.97] },
+// Light values are LINEAR and HDR: the sun is allowed past 1.0, the ambient is the cool
+// sky bounce that fills the shadow side. Fog is measured on the ground plane, so these
+// distances are how far DOWN THE ROAD the haze starts — not how far from the camera's eye.
+const TIMES = [ // day / sunset / night
+  { sky: '#CBDAE4', fogN: 38, fogF: 82, amb: [0.34, 0.38, 0.45], light: [1.02, 0.97, 0.87], sun: [0.551, 0.702, -0.451] },
+  { sky: '#E9B896', fogN: 36, fogF: 78, amb: [0.30, 0.26, 0.30], light: [1.20, 0.78, 0.48], sun: [0.72, 0.36, -0.59] },
+  { sky: '#1E2749', fogN: 34, fogF: 74, amb: [0.08, 0.10, 0.18], light: [0.20, 0.24, 0.42], sun: [0.40, 0.80, -0.44] },
 ];
 
 // ---------- save ----------
@@ -73,11 +92,11 @@ function save() { try { localStorage.setItem('tonys_v1', JSON.stringify(S)); } c
 
 // ---------- skins ----------
 const SKINS = [
-  { id: 'classico', name: 'Classico', cost: 0,    body: '#E63946', trim: '#9D2230', rider: '#2B6E4F', helmet: '#E9E5DA' },
-  { id: 'verde',    name: 'Verde Basilico', cost: 150, body: '#2A9D5C', trim: '#1D7040', rider: '#8A3033', helmet: '#E9E5DA' },
+  { id: 'classico', name: 'Classico', cost: 0,    body: '#E63946', trim: '#9D2230', rider: '#2B6E4F', helmet: '#F4F0E4' },
+  { id: 'verde',    name: 'Verde Basilico', cost: 150, body: '#2A9D5C', trim: '#1D7040', rider: '#8A3033', helmet: '#F4F0E4' },
   { id: 'notte',    name: 'Blu Notte', cost: 300,  body: '#3D5A99', trim: '#273C69', rider: '#33343E', helmet: '#F2C14E' },
   { id: 'taxi',     name: 'Giallo Taxi', cost: 450, body: '#F2B722', trim: '#B8860B', rider: '#33343E', helmet: '#26262B' },
-  { id: 'gelato',   name: 'Rosa Gelato', cost: 650, body: '#F27E9B', trim: '#C2506F', rider: '#7BC9C2', helmet: '#EFEBE2' },
+  { id: 'gelato',   name: 'Rosa Gelato', cost: 650, body: '#F27E9B', trim: '#C2506F', rider: '#7BC9C2', helmet: '#F6F2E9' },
   { id: 'oro',      name: "Don d'Oro", cost: 1000, body: '#D4AF37', trim: '#8A6D1D', rider: '#26262B', helmet: '#D4AF37' },
 ];
 const curSkin = () => SKINS.find(s => s.id === S.skin) || SKINS[0];
@@ -169,66 +188,201 @@ function project(x, y, z) { // world -> overlay logical px, null if behind camer
 }
 
 // ---------- WebGL core ----------
-let gl = null, prog = null, loc = {};
+// WebGL2 where available (real MSAA + float render targets); WebGL1 is a degraded fallback.
+let gl = null, prog = null, loc = {}, isGL2 = false, hdrOK = false, HALF = 0, SAMPLES = 0;
+// fragment shaders: highp where the device has it, mediump otherwise
+const FSP = '#ifdef GL_FRAGMENT_PRECISION_HIGH\nprecision highp float;\n#else\nprecision mediump float;\n#endif\n';
+const VSTRIDE = 40; // pos3 + norm3 + col3 + emis1, interleaved
+function compile(type, src) {
+  const s2 = gl.createShader(type);
+  gl.shaderSource(s2, src);
+  gl.compileShader(s2);
+  if (!gl.getShaderParameter(s2, gl.COMPILE_STATUS)) {
+    // a silent shader failure used to mean a black screen and no clue why
+    console.error('shader compile failed:\n' + gl.getShaderInfoLog(s2) + '\n---\n' + src);
+    return null;
+  }
+  return s2;
+}
+function link(vsSrc, fsSrc) {
+  const p = gl.createProgram();
+  const v = compile(gl.VERTEX_SHADER, vsSrc), f = compile(gl.FRAGMENT_SHADER, fsSrc);
+  if (!v || !f) return null;
+  gl.attachShader(p, v);
+  gl.attachShader(p, f);
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+    console.error('program link failed: ' + gl.getProgramInfoLog(p));
+    return null;
+  }
+  return p;
+}
 function initGL() {
   try {
-    gl = glc.getContext('webgl', { antialias: true, alpha: false }) || glc.getContext('experimental-webgl');
+    gl = glc.getContext('webgl2', { antialias: false, alpha: false, depth: true });
+    if (gl) isGL2 = true;
+    else gl = glc.getContext('webgl', { antialias: true, alpha: false }) || glc.getContext('experimental-webgl');
   } catch (e) { gl = null; }
   if (!gl) return;
-  const vs = 'attribute vec3 aPos;attribute vec3 aNorm;attribute vec3 aCol;' +
-    'uniform mat4 uMVP;uniform mat4 uModel;uniform vec3 uLightDir;uniform vec3 uLightCol;uniform float uAmb;' +
-    'uniform vec3 uTint;uniform vec3 uEye;uniform vec2 uFog;' +
-    'varying vec3 vCol;varying float vFog;' +
+  if (isGL2) {
+    // RGBA16F needs to be color-renderable for the HDR scene target
+    hdrOK = !!(gl.getExtension('EXT_color_buffer_float') || gl.getExtension('EXT_color_buffer_half_float'));
+    HALF = gl.HALF_FLOAT;
+    SAMPLES = Math.min(4, gl.getParameter(gl.MAX_SAMPLES) || 0);
+  } else {
+    const hf = gl.getExtension('OES_texture_half_float');
+    const hfl = gl.getExtension('OES_texture_half_float_linear');
+    const cb = gl.getExtension('EXT_color_buffer_half_float');
+    hdrOK = !!(hf && hfl && cb);
+    if (hf) HALF = hf.HALF_FLOAT_OES;
+  }
+  // Lighting is PER-PIXEL. It used to be per-vertex, which on boxes this large meant a
+  // whole face got one lighting value — no gradient, no shadow detail, nothing to sculpt
+  // with. The vertex stage now just hands the fragment stage a surface to light.
+  const vs =
+    'attribute vec3 aPos;attribute vec3 aNorm;attribute vec3 aCol;attribute float aEmis;' +
+    'uniform mat4 uMVP;uniform mat4 uModel;uniform vec3 uTint;uniform float uEmis;' +
+    'varying vec3 vBase;varying vec3 vNorm;varying vec3 vWP;varying float vE;' +
     'void main(){' +
     'vec4 wp=uModel*vec4(aPos,1.0);' +
     'gl_Position=uMVP*vec4(aPos,1.0);' +
-    'vec3 n=normalize(mat3(uModel)*aNorm);' +
+    'vWP=wp.xyz;' +
+    'vNorm=mat3(uModel)*aNorm;' +
+    'vBase=aCol*uTint;' +
+    'vE=aEmis*uEmis;}';
+  const fs = FSP +
+    'varying vec3 vBase;varying vec3 vNorm;varying vec3 vWP;varying float vE;' +
+    'uniform vec3 uLightDir;uniform vec3 uLightCol;uniform vec3 uAmbCol;' +
+    'uniform vec3 uEye;uniform vec2 uFog;uniform vec3 uFogCol;uniform float uSpec;' +
+    'uniform mat4 uLightVP;uniform sampler2D uShadow;uniform vec2 uSM;' + // uSM = (texel, on)
+    'float shade(float ndl){' +
+    'if(uSM.y<0.5)return 1.0;' +
+    'vec4 ls=uLightVP*vec4(vWP,1.0);' +
+    'vec3 p=ls.xyz/ls.w*0.5+0.5;' +
+    'if(p.z>1.0||p.x<0.0||p.x>1.0||p.y<0.0||p.y>1.0)return 1.0;' +
+    // slope-scaled bias: grazing surfaces need more room before they shadow themselves
+    'float b=max(0.0032*(1.0-ndl),0.0006);' +
+    'float s=0.0;' +
+    'for(int i=-1;i<=1;i++){for(int j=-1;j<=1;j++){' +
+    'float d=texture2D(uShadow,p.xy+vec2(float(i),float(j))*uSM.x).r;' +
+    's+=step(p.z-b,d);}}' +
+    'return s*0.1111;}' +
+    'void main(){' +
+    'vec3 n=normalize(vNorm);' +
     'float d=max(dot(n,uLightDir),0.0);' +
-    'vCol=aCol*uTint*(uAmb+d*(1.0-uAmb))*uLightCol;' +
-    'vFog=clamp((distance(wp.xyz,uEye)-uFog.x)/(uFog.y-uFog.x),0.0,1.0);}';
-  const fs = 'precision mediump float;varying vec3 vCol;varying float vFog;uniform vec3 uFogCol;' +
-    'void main(){gl_FragColor=vec4(mix(vCol,uFogCol,vFog),1.0);}';
-  function sh(type, src) {
-    const s2 = gl.createShader(type);
-    gl.shaderSource(s2, src);
-    gl.compileShader(s2);
-    return s2;
-  }
-  prog = gl.createProgram();
-  gl.attachShader(prog, sh(gl.VERTEX_SHADER, vs));
-  gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, fs));
-  gl.linkProgram(prog);
+    'float sh=shade(d);' +
+    'vec3 lit=vBase*(uAmbCol+uLightCol*d*sh);' +
+    'vec3 V=normalize(uEye-vWP);' +
+    'vec3 Hv=normalize(uLightDir+V);' +
+    'lit+=uLightCol*uSpec*pow(max(dot(n,Hv),0.0),28.0)*step(0.0001,d)*sh;' +
+    // emission rides on top and is free to exceed 1.0 — that is what feeds the bloom
+    'vec3 c=lit+vBase*vE;' +
+    // fog on GROUND-PLANE distance. Measuring from the eye made the camera's altitude
+    // count against every pixel, which is what beiged the top third of the frame.
+    'float f=clamp((length(vWP.xz-uEye.xz)-uFog.x)/(uFog.y-uFog.x),0.0,1.0);' +
+    'gl_FragColor=vec4(mix(c,uFogCol,f),1.0);}';
+  prog = link(vs, fs);
+  if (!prog) { gl = null; return; }
   gl.useProgram(prog);
-  for (const n of ['uMVP', 'uModel', 'uLightDir', 'uLightCol', 'uAmb', 'uTint', 'uEye', 'uFog', 'uFogCol']) loc[n] = gl.getUniformLocation(prog, n);
+  for (const n of ['uMVP', 'uModel', 'uLightDir', 'uLightCol', 'uAmbCol', 'uTint', 'uEye', 'uFog', 'uFogCol', 'uEmis', 'uSpec', 'uLightVP', 'uShadow', 'uSM']) loc[n] = gl.getUniformLocation(prog, n);
   loc.aPos = gl.getAttribLocation(prog, 'aPos');
   loc.aNorm = gl.getAttribLocation(prog, 'aNorm');
   loc.aCol = gl.getAttribLocation(prog, 'aCol');
-  gl.enableVertexAttribArray(loc.aPos);
-  gl.enableVertexAttribArray(loc.aNorm);
-  gl.enableVertexAttribArray(loc.aCol);
+  loc.aEmis = gl.getAttribLocation(prog, 'aEmis');
+  gl.uniform1i(loc.uShadow, 3);
+  bindSceneAttribs();
   gl.enable(gl.DEPTH_TEST);
   gl.enable(gl.CULL_FACE);
   gl.cullFace(gl.BACK);
+  initShadow();
 }
-// a model = list of boxes [cx,cy,cz,w,h,d,'#hex'] baked into one VBO (pos3,norm3,col3)
+// ---------- shadow map ----------
+// One 2048^2 directional depth map on an ortho frustum that tracks the player. The world
+// is a narrow corridor, so the frustum is tiny and the resolution is luxurious.
+// This replaces MOD.shadow, which was a flat dark box sitting *under* each object —
+// it never read as a cast shadow because it wasn't one.
+let sprog = null, sloc = {}, sm = null, lightVP = null, shadowsOK = false, PASS = 0;
+const SM_SIZE = 2048;
+function mOrtho(l, r, b, t2, n, f) {
+  const o = new Float32Array(16);
+  o[0] = 2 / (r - l); o[5] = 2 / (t2 - b); o[10] = -2 / (f - n);
+  o[12] = -(r + l) / (r - l); o[13] = -(t2 + b) / (t2 - b); o[14] = -(f + n) / (f - n); o[15] = 1;
+  return o;
+}
+function initShadow() {
+  if (!isGL2) return; // WebGL1 keeps the old decals rather than failing
+  sprog = link(
+    'attribute vec3 aPos;uniform mat4 uMVP;void main(){gl_Position=uMVP*vec4(aPos,1.0);}',
+    FSP + 'void main(){gl_FragColor=vec4(1.0);}');
+  if (!sprog) return;
+  sloc.uMVP = gl.getUniformLocation(sprog, 'uMVP');
+  sloc.aPos = gl.getAttribLocation(sprog, 'aPos');
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.DEPTH_COMPONENT24, SM_SIZE, SM_SIZE, 0, gl.DEPTH_COMPONENT, gl.UNSIGNED_INT, null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  const fb = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, tex, 0);
+  gl.drawBuffers([gl.NONE]);
+  gl.readBuffer(gl.NONE);
+  const ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  if (!ok) { console.error('shadow fbo incomplete'); return; }
+  sm = { tex, fb };
+  shadowsOK = true;
+}
+// Fit the ortho box to the visible slab of world, then SNAP it to the texel grid — without
+// snapping, the map slides continuously under the camera and every shadow edge crawls.
+function buildLightVP(sun, cx2) {
+  const c = [cx2, 0, -14], D = 60;
+  const view = mLookAt([c[0] + sun[0] * D, c[1] + sun[1] * D, c[2] + sun[2] * D], c, [0, 1, 0]);
+  let mnx = 1e9, mny = 1e9, mnz = 1e9, mxx = -1e9, mxy = -1e9, mxz = -1e9;
+  for (const X of [cx2 - 15, cx2 + 15]) for (const Y of [0, 9]) for (const Z of [6, -40]) {
+    const vx = view[0] * X + view[4] * Y + view[8] * Z + view[12];
+    const vy = view[1] * X + view[5] * Y + view[9] * Z + view[13];
+    const vz = view[2] * X + view[6] * Y + view[10] * Z + view[14];
+    mnx = Math.min(mnx, vx); mxx = Math.max(mxx, vx);
+    mny = Math.min(mny, vy); mxy = Math.max(mxy, vy);
+    mnz = Math.min(mnz, vz); mxz = Math.max(mxz, vz);
+  }
+  const tw = (mxx - mnx) / SM_SIZE, th = (mxy - mny) / SM_SIZE;
+  mnx = Math.floor(mnx / tw) * tw; mny = Math.floor(mny / th) * th;
+  lightVP = mMul(mOrtho(mnx, mnx + tw * SM_SIZE, mny, mny + th * SM_SIZE, -mxz - 6, -mnz + 6), view);
+}
+function bindSceneAttribs() {
+  gl.enableVertexAttribArray(loc.aPos);
+  gl.enableVertexAttribArray(loc.aNorm);
+  gl.enableVertexAttribArray(loc.aCol);
+  gl.enableVertexAttribArray(loc.aEmis);
+}
+// a model = list of boxes [cx,cy,cz,w,h,d,'#hex', emissive?] baked into one VBO
+// Per-face factors sculpt the boxes. They used to swing 0.6..1.0 while the real light
+// only swung 0.19 — the fake tint was 3.5x the sun. Softened; the sun does the work now.
 const FACES = [
   { n: [0, 1, 0], f: 1.0, c: [[-1, 1, -1], [-1, 1, 1], [1, 1, 1], [1, 1, -1]] },
-  { n: [0, -1, 0], f: 0.6, c: [[-1, -1, 1], [-1, -1, -1], [1, -1, -1], [1, -1, 1]] },
-  { n: [0, 0, 1], f: 0.95, c: [[-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1]] },
-  { n: [0, 0, -1], f: 0.9, c: [[1, -1, -1], [-1, -1, -1], [-1, 1, -1], [1, 1, -1]] },
-  { n: [1, 0, 0], f: 0.86, c: [[1, -1, 1], [1, -1, -1], [1, 1, -1], [1, 1, 1]] },
-  { n: [-1, 0, 0], f: 0.8, c: [[-1, -1, -1], [-1, -1, 1], [-1, 1, 1], [-1, 1, -1]] },
+  { n: [0, -1, 0], f: 0.82, c: [[-1, -1, 1], [-1, -1, -1], [1, -1, -1], [1, -1, 1]] },
+  { n: [0, 0, 1], f: 0.98, c: [[-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1]] },
+  { n: [0, 0, -1], f: 0.96, c: [[1, -1, -1], [-1, -1, -1], [-1, 1, -1], [1, 1, -1]] },
+  { n: [1, 0, 0], f: 0.95, c: [[1, -1, 1], [1, -1, -1], [1, 1, -1], [1, 1, 1]] },
+  { n: [-1, 0, 0], f: 0.93, c: [[-1, -1, -1], [-1, -1, 1], [-1, 1, 1], [-1, 1, -1]] },
 ];
 function voxModel(boxes) {
   const verts = [];
   for (const b of boxes) {
     const bx = b[0], by = b[1], bz = b[2], w = b[3], h = b[4], d = b[5];
     const col = col3(b[6]);
+    const emis = b[7] || 0;
     for (const face of FACES) {
+      // a light has no dark side — skip the sculpting factor on emissive boxes
+      const f = emis > 0 ? 1 : face.f;
       const q = face.c.map(k => [bx + k[0] * w / 2, by + k[1] * h / 2, bz + k[2] * d / 2]);
       for (const idx of [0, 1, 2, 0, 2, 3]) {
         const p = q[idx];
-        verts.push(p[0], p[1], p[2], face.n[0], face.n[1], face.n[2], col[0] * face.f, col[1] * face.f, col[2] * face.f);
+        verts.push(p[0], p[1], p[2], face.n[0], face.n[1], face.n[2], col[0] * f, col[1] * f, col[2] * f, emis);
       }
     }
   }
@@ -236,90 +390,143 @@ function voxModel(boxes) {
   const vbo = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(verts), gl.STATIC_DRAW);
-  return { vbo, count: verts.length / 9 };
+  return { vbo, count: verts.length / 10 };
 }
 function discModel() {
   // radial gradient disc with a HOT core: center 1.0 -> 0.42 at 30% radius -> 0 at rim.
   // The steep inner falloff is what makes additive light read as light, not grey haze.
+  // Fully emissive: these ARE lights, so they live above 1.0 and drive the bloom.
   const verts = [];
-  const N = 16, R1 = 0.15, C1 = 0.42;
+  const N = 24, R1 = 0.15, C1 = 0.42;
+  const v = (x, y, c) => verts.push(x, y, 0, 0, 0, 1, c, c, c, 1);
   for (let i = 0; i < N; i++) {
     const a0 = i / N * TAU, a1 = (i + 1) / N * TAU;
     const c0 = Math.cos(a0), s0 = Math.sin(a0), c1 = Math.cos(a1), s1 = Math.sin(a1);
-    // core fan
-    verts.push(0, 0, 0, 0, 0, 1, 1, 1, 1);
-    verts.push(c0 * R1, s0 * R1, 0, 0, 0, 1, C1, C1, C1);
-    verts.push(c1 * R1, s1 * R1, 0, 0, 0, 1, C1, C1, C1);
-    // outer ring (two triangles)
-    verts.push(c0 * R1, s0 * R1, 0, 0, 0, 1, C1, C1, C1);
-    verts.push(c0 * 0.5, s0 * 0.5, 0, 0, 0, 1, 0, 0, 0);
-    verts.push(c1 * 0.5, s1 * 0.5, 0, 0, 0, 1, 0, 0, 0);
-    verts.push(c0 * R1, s0 * R1, 0, 0, 0, 1, C1, C1, C1);
-    verts.push(c1 * 0.5, s1 * 0.5, 0, 0, 0, 1, 0, 0, 0);
-    verts.push(c1 * R1, s1 * R1, 0, 0, 0, 1, C1, C1, C1);
+    v(0, 0, 1); v(c0 * R1, s0 * R1, C1); v(c1 * R1, s1 * R1, C1);                        // core fan
+    v(c0 * R1, s0 * R1, C1); v(c0 * 0.5, s0 * 0.5, 0); v(c1 * 0.5, s1 * 0.5, 0);          // outer ring
+    v(c0 * R1, s0 * R1, C1); v(c1 * 0.5, s1 * 0.5, 0); v(c1 * R1, s1 * R1, C1);
   }
   if (!gl) return { count: 0 };
   const vbo = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(verts), gl.STATIC_DRAW);
-  return { vbo, count: verts.length / 9 };
+  return { vbo, count: verts.length / 10 };
 }
 const WHITE_TINT = [1, 1, 1];
+let curEmis = -1, curSpec = -1;
 function drawModel(m, x, y, z, o) {
   if (!gl || !m.count) return;
   o = o || {};
   const mod = mCompose(x, y, z, o.ry, o.rx, o.rz, o.s);
+  if (PASS === 1) { // depth-only pass into the shadow map: position is all that matters
+    if (o.noCast) return;
+    gl.uniformMatrix4fv(sloc.uMVP, false, mMul(lightVP, mod));
+    gl.bindBuffer(gl.ARRAY_BUFFER, m.vbo);
+    gl.vertexAttribPointer(sloc.aPos, 3, gl.FLOAT, false, VSTRIDE, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, m.count);
+    return;
+  }
   gl.uniformMatrix4fv(loc.uModel, false, mod);
   gl.uniformMatrix4fv(loc.uMVP, false, mMul(lastVP, mod));
   gl.uniform3fv(loc.uTint, o.tint || WHITE_TINT);
+  const em = o.emis === undefined ? 1 : o.emis;
+  const sp = o.spec || 0;
+  if (em !== curEmis) { gl.uniform1f(loc.uEmis, em); curEmis = em; }
+  if (sp !== curSpec) { gl.uniform1f(loc.uSpec, sp); curSpec = sp; }
   gl.bindBuffer(gl.ARRAY_BUFFER, m.vbo);
-  gl.vertexAttribPointer(loc.aPos, 3, gl.FLOAT, false, 36, 0);
-  gl.vertexAttribPointer(loc.aNorm, 3, gl.FLOAT, false, 36, 12);
-  gl.vertexAttribPointer(loc.aCol, 3, gl.FLOAT, false, 36, 24);
+  gl.vertexAttribPointer(loc.aPos, 3, gl.FLOAT, false, VSTRIDE, 0);
+  gl.vertexAttribPointer(loc.aNorm, 3, gl.FLOAT, false, VSTRIDE, 12);
+  gl.vertexAttribPointer(loc.aCol, 3, gl.FLOAT, false, VSTRIDE, 24);
+  gl.vertexAttribPointer(loc.aEmis, 1, gl.FLOAT, false, VSTRIDE, 36);
   gl.drawArrays(gl.TRIANGLES, 0, m.count);
 }
 // ---------- voxel models ----------
-const P_ROAD = '#4A5063', P_DASH = '#FFFFFF', P_CURB = '#3FA45C', P_WALK = '#DAD6C8', P_SAND = '#E8A75F', P_DARK = '#26262B';
+// PALETTE. The old one was three tans (sand / sidewalk / fog) fighting each other, with the
+// sand alone covering more of the frame than anything else — that is what read as "desert"
+// no matter how the lighting was tuned. This one is built on VALUE SEPARATION: the road is
+// dark, the walk is mid, the roadside is light and warm, and green appears only where a
+// plant actually is. Colour zones, not one field.
+const P_ROAD = '#4E5361', P_DASH = '#E8E4D6', P_CURB = '#B3AA98', P_WALK = '#ADA595', P_DARK = '#26262B';
+const P_KERB = '#8F8677';                                   // shaded kerb face
+const GROUND = ['#C9BFA6', '#C2B79D', '#CFC5AD', '#BCB196']; // warm stone plaza
+const TERRA = ['#C08A63', '#B87F58', '#C99372'];             // terracotta paving
+const GRASS = ['#5F9E52', '#68A85A', '#579349'];
+const KERBGREEN = ['#5D9159', '#548450', '#649B5E'];         // muted, so it reads as a planter
+const SOIL = '#6E5A45';
+// asphalt grit sits within a hair of the road value — visible as wear, not as rectangles
+const ROADGRIT = ['#4A4F5D', '#525765', '#484D5B', '#535866'];
 const CARCOLS = ['#5B8FB9', '#C97BA7', '#7FB069', '#E0A458', '#8D86C9', '#B56357', '#6D9DC5', '#F2B722'];
 const MOD = {};
 const carModels = {}, scooterModels = {};
 const SEG_LEN = 4; // world units per road segment (= 192 track px)
-function buildRoadSeg() {
+// Sidewalks used to be 2.7u wide — wider than a car — and with a long lens they ate half
+// the frame while the buildings fell off the edges. Narrowed, and the roadside pulled in.
+const WALK_IN = 3.84, WALK_OUT = 5.35;    // sidewalk inner/outer edge
+const PLOT_X = 360;                       // roadside plot centre, in track px (7.5u)
+const NSEG = 8;                           // road segment variants — one model reused for
+                                          // every segment turned the road into wallpaper
+function buildRoadSeg(seed) {
+  const wc = (WALK_IN + WALK_OUT) / 2, ww = WALK_OUT - WALK_IN;
+  const H = i => hash(seed * 131 + i * 17 + 3);
   const b = [
     [0, -0.06, 0, 7.0, 0.12, SEG_LEN, P_ROAD],          // asphalt
-    [-3.62, 0.1, 0, 0.44, 0.3, SEG_LEN, P_WALK],        // stone curbs...
-    [3.62, 0.1, 0, 0.44, 0.3, SEG_LEN, P_WALK],
-    [-5.15, 0.02, 0, 2.7, 0.16, SEG_LEN, P_WALK],       // stone sidewalks
-    [5.15, 0.02, 0, 2.7, 0.16, SEG_LEN, P_WALK],
-    [-10.4, -0.02, 0, 8.2, 0.1, SEG_LEN, P_SAND],       // sand beyond the sidewalks
-    [10.4, -0.02, 0, 8.2, 0.1, SEG_LEN, P_SAND],
-    // subtle asphalt patchwork (barely darker than the road)
-    [1.1, -0.045, -0.8, 1.3, 0.13, 1.1, '#484E5F'],
-    [-1.6, -0.045, 1.2, 1.0, 0.13, 0.9, '#474D5E'],
+    [-3.62, 0.1, 0, 0.44, 0.3, SEG_LEN, P_CURB],        // stone curbs...
+    [3.62, 0.1, 0, 0.44, 0.3, SEG_LEN, P_CURB],
+    [-3.85, 0.08, 0, 0.06, 0.26, SEG_LEN, P_KERB],      // ...with a shaded outer lip
+    [3.85, 0.08, 0, 0.06, 0.26, SEG_LEN, P_KERB],
+    [-wc, 0.02, 0, ww, 0.16, SEG_LEN, P_WALK],          // stone sidewalks
+    [wc, 0.02, 0, ww, 0.16, SEG_LEN, P_WALK],
   ];
-  // ...with green blocks placed periodically (reference style)
-  for (const cz of [-1.1, 0.9]) {
-    b.push([-3.62, 0.3, cz, 0.48, 0.26, 1.05, P_CURB]);
-    b.push([3.62, 0.3, cz + 0.5, 0.48, 0.26, 1.05, P_CURB]);
+  // paving joints — a flat slab of one colour reads as plastic, whatever the palette
+  for (let i = 0; i < 3; i++) {
+    const jz = -SEG_LEN / 2 + (i + 0.5) * (SEG_LEN / 3);
+    b.push([-wc, 0.021, jz, ww, 0.165, 0.05, P_KERB]);
+    b.push([wc, 0.021, jz, ww, 0.165, 0.05, P_KERB]);
   }
-  for (const lx of [-1.104, 1.104]) for (const dz of [-1, 1]) b.push([lx, 0.02, dz, 0.12, 0.04, 0.95, P_DASH]);
+  // Asphalt grit. These sit 2mm proud of the road, not 1cm: any more and the lip catches
+  // the light, casts a hairline shadow, and the "wear" reads as a stack of grey rectangles.
+  const np = 2 + Math.floor(H(1) * 3);
+  for (let i = 0; i < np; i++) {
+    const px = (H(i * 3 + 5) - 0.5) * 6.2, pz = (H(i * 3 + 6) - 0.5) * (SEG_LEN - 0.6);
+    const pw2 = 0.7 + H(i * 3 + 7) * 1.5, pd = 0.6 + H(i * 3 + 8) * 1.2;
+    b.push([px, -0.059, pz, pw2, 0.122, pd, ROADGRIT[i % ROADGRIT.length]]);
+  }
+  if (H(2) > 0.78) { // manhole
+    const mx = (H(9) - 0.5) * 5;
+    b.push([mx, -0.048, (H(10) - 0.5) * 3, 0.62, 0.13, 0.62, '#3A3E49']);
+    b.push([mx, -0.043, (H(10) - 0.5) * 3, 0.44, 0.13, 0.44, '#4E535F']);
+  }
+  if (H(4) > 0.82) { // gutter drain against the kerb
+    const sx = H(11) > 0.5 ? 3.3 : -3.3;
+    b.push([sx, -0.05, (H(12) - 0.5) * 2.6, 0.34, 0.13, 0.7, '#33373F']);
+  }
+  // The kerb is stone. Green blocks along it, however sparse, always resolve into a dotted
+  // line running the length of the map — greenery belongs in the planters and trees on the
+  // plots, where it reads as a thing that grew rather than a repeating tile.
+  // occasional kerb bollard instead: vertical, sparse, breaks the run of the kerb
+  for (const cz of [-1.2, 1.0]) {
+    if (H(cz + 20) > 0.80) b.push([-3.62, 0.42, cz, 0.16, 0.5, 0.16, '#8F8677']);
+    if (H(cz + 30) > 0.80) b.push([3.62, 0.42, cz + 0.5, 0.16, 0.5, 0.16, '#8F8677']);
+  }
+  for (const lx of [-1.104, 1.104]) for (const dz of [-1, 1]) b.push([lx, 0.021, dz, 0.12, 0.04, 0.95, P_DASH]);
   return voxModel(b);
 }
 function buildXSeg() { // intersection: covers the whole segment gap, no holes
+  const wc = (WALK_IN + WALK_OUT) / 2, ww = WALK_OUT - WALK_IN;
   const b = [
     [0, -0.055, 0, 7.0, 0.12, 12.4, P_ROAD],          // main road through
     [0, -0.065, 0, 26, 0.11, 5.6, P_ROAD],            // crossing road
     [-9.5, 0.02, 0, 7, 0.16, 5.6, P_WALK],            // far sidewalks along crossing
     [9.5, 0.02, 0, 7, 0.16, 5.6, P_WALK],
   ];
-  for (const sx of [-5.15, 5.15]) for (const sz of [-4.55, 4.55]) {
-    b.push([sx, 0.02, sz, 2.7, 0.16, 3.3, P_WALK]);   // corner sidewalks
+  for (const sx of [-wc, wc]) for (const sz of [-4.55, 4.55]) {
+    b.push([sx, 0.02, sz, ww, 0.16, 3.3, P_WALK]);    // corner sidewalks
   }
   for (const sx of [-3.62, 3.62]) for (const sz of [-4.55, 4.55]) {
     b.push([sx, 0.1, sz, 0.4, 0.32, 3.3, P_CURB]);    // corner curbs
   }
-  b.push([-17.2, -0.02, 0, 8.4, 0.1, 12.4, P_SAND]);  // sand past the cross street
-  b.push([17.2, -0.02, 0, 8.4, 0.1, 12.4, P_SAND]);
+  b.push([-17.2, -0.02, 0, 8.4, 0.1, 12.4, GROUND[0]]); // roadside past the cross street
+  b.push([17.2, -0.02, 0, 8.4, 0.1, 12.4, GROUND[2]]);
   for (let i = 0; i < 8; i++) {
     const x = -3.06 + i * 0.88;
     b.push([x, 0.02, -2.35, 0.5, 0.035, 0.8, P_DASH]);
@@ -334,61 +541,88 @@ function buildChevron() { // ">" pointing +x, lying on the road
   }
   return voxModel(b);
 }
-function buildPlot(seed) { // one 4u-deep roadside plot: building / plaza / cafe
+// Mediterranean facades: ochre, terracotta, cream, sage, rose, faded blue. The old set was
+// six pale pastels that all read as the same beige at a glance.
+const WALLCOLS = ['#D9A85C', '#C86B4E', '#E3D3AE', '#A8B58A', '#CE8E80', '#9FB6C4', '#D4B483', '#B9765C'];
+const ROOFCOLS = ['#A5604B', '#AF6852', '#985742'];
+function buildPlot(seed) { // one 4u-deep roadside plot: building / piazza / market / yard
   const h1 = hash(seed * 7 + 3), h2 = hash(seed * 13 + 5), h3 = hash(seed * 29 + 11);
   const b = [];
-  b.push([0, -0.03, 0, 8, 0.1, SEG_LEN, P_SAND]); // ground under every plot
-  if (h1 < 0.34) { // building
-    const cols = ['#F2E3C4', '#E29A70', '#BFCB8F', '#F0C6B4', '#E4D2AC', '#CE9B82'];
-    const colr = cols[Math.floor(h2 * cols.length)];
-    const bh = 2.6 + h3 * 3.6, bw = 3.4 + h2 * 1.4;
-    b.push([0, bh / 2, 0, bw, bh, 3.7, colr]);
-    b.push([0, bh + 0.12, 0, bw + 0.3, 0.24, 3.95, shade(colr, -0.25).startsWith('#') ? shade(colr, -0.25) : '#8A6A50']);
-    // windows on both road-facing sides
+  // GROUND KIT — a mosaic of small tiles instead of one flat orange slab. Same cost, and
+  // it means no two stretches of roadside read the same.
+  const kit = h1 < 0.52 ? TERRA : h1 < 0.72 ? GROUND : h1 < 0.87 ? GROUND : TERRA;
+  for (let gx = 0; gx < 5; gx++) for (let gz = 0; gz < 3; gz++) {
+    const hh = hash(seed * 97 + gx * 13 + gz * 7);
+    const tx = -3.2 + gx * 1.6, tz = -SEG_LEN / 2 + (gz + 0.5) * (SEG_LEN / 3);
+    b.push([tx, -0.03, tz, 1.62, 0.1, SEG_LEN / 3 + 0.02, kit[Math.floor(hh * kit.length)]]);
+  }
+  // Buildings are the walls of the street — they need to be the common case. At a third of
+  // plots the roadside was mostly palm trees, which read as a park, not a city.
+  if (h1 < 0.52) { // building
+    const colr = WALLCOLS[Math.floor(h2 * WALLCOLS.length)];
+    const h4 = hash(seed * 37 + 19), h5 = hash(seed * 53 + 23);
+    // vary height, width, DEPTH and set-back — identical footprints turned the street into
+    // a corridor of clones, which is the same wallpaper problem the road had
+    const bh = 2.4 + h3 * 4.0, bw = 3.2 + h2 * 1.8, bd = 3.0 + h4 * 0.9;
+    const bx = 0.7 + h5 * 0.7;
+    const face = bx - bw / 2;                  // road-facing wall
+    b.push([bx, bh / 2, 0, bw, bh, bd, colr]);
+    b.push([bx, bh + 0.12, 0, bw + 0.34, 0.26, bd + 0.28, ROOFCOLS[Math.floor(h3 * 3)]]);
+    // windows with shutters, on the road-facing side
     const rows = Math.max(1, Math.floor(bh / 1.1) - 1);
     for (let r = 0; r < rows; r++) for (let k = -1; k <= 1; k++) {
       const wy = 1.5 + r * 1.1, wz = k * 1.1;
-      if (hash(seed * 51 + r * 7 + k) < 0.8) {
-        b.push([-bw / 2 - 0.03, wy, wz, 0.1, 0.55, 0.55, '#54586B']);
-        b.push([bw / 2 + 0.03, wy, wz, 0.1, 0.55, 0.55, '#54586B']);
+      if (hash(seed * 51 + r * 7 + k) < 0.82) {
+        b.push([face - 0.03, wy, wz, 0.1, 0.55, 0.55, '#4A5364']);
+        b.push([face - 0.05, wy, wz - 0.4, 0.08, 0.6, 0.2, '#7C9A6E']); // shutters
+        b.push([face - 0.05, wy, wz + 0.4, 0.08, 0.6, 0.2, '#7C9A6E']);
       }
     }
-    // ground floor: door + striped awning on both faces
-    b.push([-bw / 2 - 0.04, 0.62, 0.9, 0.12, 1.24, 0.8, '#7A4A2E']);
-    b.push([bw / 2 + 0.04, 0.62, 0.9, 0.12, 1.24, 0.8, '#7A4A2E']);
-    const ac = h2 < 0.5 ? RED : GREEN;
-    for (let k = 0; k < 4; k++) {
-      b.push([-bw / 2 - 0.35, 1.55, -1.3 + k * 0.62, 0.75, 0.12, 0.62, k % 2 ? '#E7E0CF' : ac]);
-      b.push([bw / 2 + 0.35, 1.55, -1.3 + k * 0.62, 0.75, 0.12, 0.62, k % 2 ? '#E7E0CF' : ac]);
+    b.push([face - 0.04, 0.62, 0.9 - h4 * 1.6, 0.12, 1.24, 0.8, '#6B4126']); // door
+    if (h5 > 0.45) {                            // only some shops have an awning
+      const ac = h2 < 0.5 ? RED : GREEN, az = -1.3 + (h4 - 0.5) * 1.2;
+      for (let k = 0; k < 4; k++) {
+        b.push([face - 0.35, 1.4 + h3 * 0.3, az + k * 0.62, 0.75, 0.12, 0.62, k % 2 ? '#F6F0DF' : ac]);
+      }
     }
-  } else if (h1 < 0.68) { // little piazza: bright palms
-    for (const tz of [-1.1, 1.0]) {
-      const tx = (hash(seed * 3 + tz) - 0.5) * 1.6;
-      b.push([tx, 0.15, tz, 1.1, 0.3, 1.1, '#CFCBBB']);
-      b.push([tx, 0.85, tz, 0.26, 1.5, 0.26, '#9A6A3E']);
-      b.push([tx, 1.75, tz, 1.15, 0.55, 1.15, '#48B368']);
-      b.push([tx, 2.2, tz, 0.7, 0.45, 0.7, '#5BC97B']);
-    }
-  } else if (h1 < 0.86) { // market stall with green awning + fruit crates (reference style)
-    for (const px3 of [-0.9, 0.9]) for (const pz of [-1.0, 1.0]) b.push([px3, 0.7, pz, 0.16, 1.4, 0.16, '#8A5A36']);
-    b.push([0, 1.5, 0, 2.4, 0.22, 2.6, '#3FA45C']);
-    b.push([0, 1.68, 0, 1.9, 0.16, 2.1, '#4DBB6C']);
-    b.push([0, 0.55, 0, 1.8, 0.5, 1.9, '#9A6A3E']);
-    b.push([-0.45, 0.92, -0.35, 0.55, 0.28, 0.55, '#E45444']);
-    b.push([0.4, 0.92, 0.3, 0.55, 0.28, 0.55, '#F2B722']);
-    b.push([0.35, 0.92, -0.45, 0.5, 0.26, 0.5, '#4DBB6C']);
-  } else { // road sign + sand piles
-    b.push([0, 0.9, -0.6, 0.14, 1.8, 0.14, '#9A9284']);
-    b.push([0, 1.7, -0.6, 0.95, 0.75, 0.1, '#E7E3D6']);
-    b.push([0, 1.72, -0.54, 0.5, 0.4, 0.06, '#3D6DEB']);
-    b.push([0.9, 0.16, 1.1, 0.5, 0.3, 0.5, '#D9B287']);
-    b.push([-0.7, 0.12, 0.9, 0.35, 0.22, 0.35, '#D9B287']);
+  } else if (h1 < 0.72) { // piazza: one tree, a bench, a fountain kerb
+    const tz = (h2 - 0.5) * 1.8, tx = -1.2 + (h3 - 0.5) * 1.2;
+    b.push([tx, 0.14, tz, 1.15, 0.28, 1.15, SOIL]);
+    b.push([tx, 0.85, tz, 0.26, 1.5, 0.26, '#8A5F38']);
+    b.push([tx, 1.75, tz, 1.15, 0.55, 1.15, '#3F8C4A']);
+    b.push([tx, 2.2, tz, 0.72, 0.45, 0.72, '#4FA35C']);
+    b.push([1.9, 0.28, 0.2, 0.4, 0.16, 1.5, '#8A5F38']); // bench
+    b.push([1.9, 0.14, 0.2, 0.14, 0.28, 1.4, '#5C5347']);
+    b.push([0.5, 0.18, -1.5, 0.9, 0.36, 0.9, '#C6B99E']); // fountain kerb
+    b.push([0.5, 0.3, -1.5, 0.6, 0.14, 0.6, '#7FA8B8']);
+  } else if (h1 < 0.87) { // market stall with green awning + fruit crates
+    for (const px3 of [-0.9, 0.9]) for (const pz of [-1.0, 1.0]) b.push([px3, 0.7, pz, 0.16, 1.4, 0.16, '#7C5230']);
+    b.push([0, 1.5, 0, 2.4, 0.22, 2.6, '#2F8A4A']);
+    b.push([0, 1.68, 0, 1.9, 0.16, 2.1, '#3CA05B']);
+    b.push([0, 0.55, 0, 1.8, 0.5, 1.9, '#8A5F38']);
+    b.push([-0.45, 0.92, -0.35, 0.55, 0.28, 0.55, '#D14338']);
+    b.push([0.4, 0.92, 0.3, 0.55, 0.28, 0.55, '#E0A32B']);
+    b.push([0.35, 0.92, -0.45, 0.5, 0.26, 0.5, '#3CA05B']);
+  } else { // walled yard: sign, planters, crates
+    b.push([2.4, 0.5, 0, 0.3, 1.0, 3.6, '#C6B99E']);  // low wall
+    b.push([2.4, 1.03, 0, 0.38, 0.1, 3.7, '#A2957C']);
+    b.push([-1.6, 0.9, -0.6, 0.14, 1.8, 0.14, '#8F8677']);
+    b.push([-1.6, 1.7, -0.6, 0.95, 0.75, 0.1, '#E0DCCC']);
+    b.push([-1.6, 1.72, -0.54, 0.5, 0.4, 0.06, '#3D6DEB']);
+    b.push([0.6, 0.22, 1.1, 0.7, 0.44, 0.7, SOIL]);
+    b.push([0.6, 0.58, 1.1, 0.6, 0.4, 0.6, GRASS[1]]);
   }
-  // scattered sand piles for texture
-  const hp = hash(seed * 41 + 2);
-  b.push([(hp - 0.5) * 3, 0.08, (hash(seed * 43) - 0.5) * 3, 0.3, 0.14, 0.3, '#DFAE79']);
+  // a streetlamp on most plots — vertical punctuation, and a light source come nightfall
+  if (hash(seed * 71 + 9) > 0.42) {
+    const lz = (hash(seed * 73) - 0.5) * 2.4;
+    b.push([-3.1, 1.5, lz, 0.14, 3.0, 0.14, '#6E6A61']);
+    b.push([-2.75, 3.0, lz, 0.8, 0.12, 0.14, '#6E6A61']);
+    b.push([-2.42, 2.88, lz, 0.3, 0.16, 0.3, '#FFE9B0', 0.5]);
+  }
   return voxModel(b);
 }
+// the 8th slot on a box is EMISSIVE: how far above 1.0 it drives its own colour.
+// Lamps, taillights and light bars are lights, so they say so, and the bloom finds them.
 function buildCar(colr) {
   return voxModel([
     [0, 0.48, 0, 1.5, 0.52, 2.7, colr],
@@ -398,27 +632,28 @@ function buildCar(colr) {
     [0.72, 0.24, -0.95, 0.28, 0.42, 0.42, P_DARK],
     [-0.72, 0.24, 0.95, 0.28, 0.42, 0.42, P_DARK],
     [0.72, 0.24, 0.95, 0.28, 0.42, 0.42, P_DARK],
-    [-0.48, 0.55, 1.36, 0.24, 0.18, 0.08, '#FF5D5D'],
-    [0.48, 0.55, 1.36, 0.24, 0.18, 0.08, '#FF5D5D'],
-    [-0.48, 0.55, -1.36, 0.22, 0.16, 0.06, '#FFF6C9'],
-    [0.48, 0.55, -1.36, 0.22, 0.16, 0.06, '#FFF6C9'],
+    [-0.48, 0.55, 1.36, 0.24, 0.18, 0.08, '#FF3A3A', 2.2],  // taillights
+    [0.48, 0.55, 1.36, 0.24, 0.18, 0.08, '#FF3A3A', 2.2],
+    [-0.48, 0.55, -1.36, 0.22, 0.16, 0.06, '#FFF6C9', 0.9], // headlights
+    [0.48, 0.55, -1.36, 0.22, 0.16, 0.06, '#FFF6C9', 0.9],
   ]);
 }
 function buildCop(phase) {
   return voxModel([
-    [0, 0.48, 0, 1.5, 0.52, 2.7, '#E4E7ED'],
+    [0, 0.48, 0, 1.5, 0.52, 2.7, '#F1F4FA'],
     [0, 0.62, -1.05, 1.52, 0.28, 0.62, '#2B2B33'],
     [0, 0.62, 1.05, 1.52, 0.28, 0.62, '#2B2B33'],
     [0, 0.98, 0.1, 1.3, 0.52, 1.5, '#AFCEDF'],
-    [0, 1.28, 0.1, 1.36, 0.14, 1.56, '#DBE0E9'],
-    [-0.25, 1.44, 0.1, 0.4, 0.2, 0.5, phase ? '#FF4757' : '#7A1520'],
-    [0.25, 1.44, 0.1, 0.4, 0.2, 0.5, phase ? '#22307A' : '#3D6DEB'],
+    [0, 1.28, 0.1, 1.36, 0.14, 1.56, '#EAEFF6'],
+    // only the lit half of the bar emits — that's what makes it read as alternating
+    [-0.25, 1.44, 0.1, 0.4, 0.2, 0.5, phase ? '#FF4757' : '#7A1520', phase ? 2.0 : 0],
+    [0.25, 1.44, 0.1, 0.4, 0.2, 0.5, phase ? '#22307A' : '#3D6DEB', phase ? 0 : 2.0],
     [-0.72, 0.24, -0.95, 0.28, 0.42, 0.42, P_DARK],
     [0.72, 0.24, -0.95, 0.28, 0.42, 0.42, P_DARK],
     [-0.72, 0.24, 0.95, 0.28, 0.42, 0.42, P_DARK],
     [0.72, 0.24, 0.95, 0.28, 0.42, 0.42, P_DARK],
-    [-0.48, 0.55, 1.36, 0.22, 0.16, 0.06, '#FF6B6B'],
-    [0.48, 0.55, 1.36, 0.22, 0.16, 0.06, '#FF6B6B'],
+    [-0.48, 0.55, 1.36, 0.22, 0.16, 0.06, '#FF3A3A', 2.2],
+    [0.48, 0.55, 1.36, 0.22, 0.16, 0.06, '#FF3A3A', 2.2],
   ]);
 }
 function buildScooter(sk) {
@@ -438,28 +673,32 @@ function buildScooter(sk) {
     [0, 1.64, 0.12, 0.46, 0.42, 0.46, sk.helmet],        // helmet
     [0, 1.6, -0.12, 0.34, 0.18, 0.06, '#2B2B33'],        // visor
     [0, 1.06, 0.72, 0.74, 0.32, 0.74, '#B02A33'],        // pizza box
-    [0, 1.25, 0.72, 0.78, 0.09, 0.78, '#E7E2D2'],        // lid
+    [0, 1.25, 0.72, 0.78, 0.09, 0.78, '#F7F2E2'],        // lid
+    // read from directly overhead the lid was just a white square — give it Tony's mark
+    [0, 1.31, 0.72, 0.46, 0.04, 0.46, RED],
+    [0, 1.33, 0.72, 0.26, 0.04, 0.26, GOLD],
     [0, 1.06, 1.11, 0.2, 0.2, 0.05, GOLD],               // logo
   ]);
 }
 function buildModels() {
-  MOD.seg = buildRoadSeg();
+  MOD.segs = [];
+  for (let i = 0; i < NSEG; i++) MOD.segs.push(buildRoadSeg(i + 1));
   MOD.xseg = buildXSeg();
   MOD.chev = buildChevron();
   MOD.plots = [];
-  for (let i = 0; i < 8; i++) MOD.plots.push(buildPlot(i + 1));
+  for (let i = 0; i < 14; i++) MOD.plots.push(buildPlot(i + 1));
   MOD.copA = buildCop(0);
   MOD.copB = buildCop(1);
   MOD.barrier = voxModel([
     [-0.85, 0.28, 0, 0.2, 0.56, 0.2, '#7A5230'],
     [0.85, 0.28, 0, 0.2, 0.56, 0.2, '#7A5230'],
     [-0.8, 0.82, 0, 0.4, 0.5, 0.18, '#F2761B'],
-    [-0.4, 0.82, 0, 0.4, 0.5, 0.18, '#E8E2D2'],
+    [-0.4, 0.82, 0, 0.4, 0.5, 0.18, '#F5EFDF'],
     [0, 0.82, 0, 0.4, 0.5, 0.18, '#F2761B'],
-    [0.4, 0.82, 0, 0.4, 0.5, 0.18, '#E8E2D2'],
+    [0.4, 0.82, 0, 0.4, 0.5, 0.18, '#F5EFDF'],
     [0.8, 0.82, 0, 0.4, 0.5, 0.18, '#F2761B'],
   ]);
-  MOD.blink = voxModel([[0, 0, 0, 0.22, 0.22, 0.22, GOLD]]);
+  MOD.blink = voxModel([[0, 0, 0, 0.22, 0.22, 0.22, GOLD, 3.2]]);
   MOD.slice = voxModel([
     [0, 1.0, 0, 0.95, 0.24, 0.2, CRUST],
     [0, 0.77, 0, 0.78, 0.24, 0.18, GOLD],
@@ -469,35 +708,20 @@ function buildModels() {
     [0.16, 0.74, 0.11, 0.17, 0.17, 0.06, '#B5303A'],
     [0, 0.5, 0.1, 0.15, 0.15, 0.06, '#B5303A'],
   ]);
-  // chunky lying breadstick (reference style) — drawn EMISSIVE so it glows by itself
+  // chunky lying breadstick — genuinely emissive, so it self-lights and feeds the bloom.
+  // Kept just over the bloom knee: enough to glow and spill, low enough to stay GOLD.
+  // Push it much higher and ACES rolls it to white, which is what "too much" looked like.
   MOD.stick = voxModel([
-    [0, 0, 0, 1.05, 0.3, 0.36, '#E8B558'],
-    [-0.58, 0, 0, 0.16, 0.24, 0.3, '#D9A04B'],
-    [0.58, 0, 0, 0.16, 0.24, 0.3, '#D9A04B'],
-    [-0.3, 0.17, 0, 0.18, 0.12, 0.32, '#F4CC7E'],
-    [0.02, 0.17, 0, 0.18, 0.12, 0.32, '#F4CC7E'],
-    [0.34, 0.17, 0, 0.18, 0.12, 0.32, '#F4CC7E'],
+    [0, 0, 0, 1.05, 0.3, 0.36, '#F2A93C', 1.25],
+    [-0.58, 0, 0, 0.16, 0.24, 0.3, '#E09330', 1.05],
+    [0.58, 0, 0, 0.16, 0.24, 0.3, '#E09330', 1.05],
+    [-0.3, 0.17, 0, 0.18, 0.12, 0.32, '#FFCB6B', 1.55],
+    [0.02, 0.17, 0, 0.18, 0.12, 0.32, '#FFCB6B', 1.55],
+    [0.34, 0.17, 0, 0.18, 0.12, 0.32, '#FFCB6B', 1.55],
   ]);
-  // flashlight beam: flat gradient wedge, hot at the lamp, fading out
-  {
-    const bv = [];
-    const q = (x, z, c) => bv.push(x, 0, z, 0, 1, 0, c, c, c);
-    const tri = (a, b, c2) => { q(a[0], a[1], a[2]); q(b[0], b[1], b[2]); q(c2[0], c2[1], c2[2]); };
-    const O = [0, 0, 1], L1 = [-0.26, -0.45, 0.42], C1 = [0, -0.45, 0.6], R1 = [0.26, -0.45, 0.42];
-    const L2 = [-0.5, -1, 0], C2 = [0, -1, 0.06], R2 = [0.5, -1, 0];
-    tri(O, L1, C1); tri(O, C1, R1);
-    tri(L1, L2, C2); tri(L1, C2, C1);
-    tri(C1, C2, R2); tri(C1, R2, R1);
-    if (gl) {
-      const vbo = gl.createBuffer();
-      gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
-      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(bv), gl.STATIC_DRAW);
-      MOD.beam2 = { vbo, count: bv.length / 9 };
-    } else MOD.beam2 = { count: 0 };
-  }
   MOD.pothole = voxModel([
-    [0, 0.014, 0, 1.05, 0.028, 0.72, '#3A3E4A'],
-    [0, 0.03, 0, 0.72, 0.028, 0.46, '#181A21'],
+    [0, 0.014, 0, 1.05, 0.028, 0.72, '#454A56'],
+    [0, 0.03, 0, 0.72, 0.028, 0.46, '#2B2F38'],
   ]);
   MOD.cone = voxModel([
     [0, 0.14, 0, 0.4, 0.28, 0.4, '#F2761B'],
@@ -512,9 +736,9 @@ function buildModels() {
     [0, 1.5, 0, 0.4, 0.12, 0.4, '#22314A'],
     [0, 1.44, -0.22, 0.36, 0.06, 0.14, '#22314A'],
   ]);
-  MOD.beam = voxModel([[0, 0, 0, 6.6, 0.05, 0.14, '#7AC8FF']]);
-  MOD.shadow = voxModel([[0, 0, 0, 1, 0.024, 1, '#3A3E4E']]);
-  MOD.walkShadow = voxModel([[0, 0, 0, 1, 0.024, 1, '#B99F79']]);
+  MOD.beam = voxModel([[0, 0, 0, 6.6, 0.05, 0.14, '#7AC8FF', 2.4]]);
+  MOD.shadow = voxModel([[0, 0, 0, 1, 0.024, 1, '#1B1E28']]);
+  MOD.walkShadow = voxModel([[0, 0, 0, 1, 0.024, 1, '#6E5C42']]);
   MOD.cube = voxModel([[0, 0, 0, 1, 1, 1, '#FFFFFF']]);
   MOD.pin = voxModel([
     [0, 0.85, 0, 0.62, 0.62, 0.62, RED],
@@ -532,9 +756,9 @@ function buildModels() {
   ]);
   // (headlight is real additive light in the glow pass now — no grey slabs)
   // horizon: ground plane + hazy skyline (camera never moves in z, so these are a free skybox)
-  MOD.farground = voxModel([[0, -0.55, 0, 280, 1, 170, '#E3A55E']]);
+  MOD.farground = voxModel([[0, -0.55, 0, 280, 1, 170, '#BEB49B']]);
   const cityB = [];
-  const cityCols = ['#C9AE8C', '#B99B78', '#D4B896', '#A98F72', '#C4A584'];
+  const cityCols = ['#C2A98A', '#AD9273', '#CBB392', '#9E8768', '#BC9F7E'];
   for (let i = 0; i < 13; i++) {
     const hx = hash(i * 17 + 5), hh = hash(i * 31 + 9);
     const bw2 = 8 + hx * 8, bh2 = 6 + hh * 19;
@@ -561,9 +785,16 @@ function scooterModel(sk) {
   if (!scooterModels[sk.id]) scooterModels[sk.id] = buildScooter(sk);
   return scooterModels[sk.id];
 }
-// ---------- bloom post-processing ----------
-// scene -> FBO, bright-pass at 1/4 res, two-pass Gaussian blur, additive composite + vignette
-let post = null;
+// ---------- HDR post-processing ----------
+// scene -> MSAA HDR framebuffer -> resolve -> bright-pass -> blur -> ACES tonemap + gamma.
+// The scene target is float, so lights genuinely live above 1.0 and the bright-pass can
+// tell "a lamp" from "a white wall". With an 8-bit target it never could, which is why
+// glowing things used to need faked full-bright tints and white props had to be hand-dimmed.
+let post = null, SS = 1, EXPOSURE = 1.28, BLOOM = 0.26;
+// Focus band sits ON the player (vUV.y is 0 at the BOTTOM of the frame, and the scooter
+// lives near the bottom) and softens into the distance. Gameplay clarity beats a textbook
+// tilt-shift: whatever else happens, the thing you are steering stays crisp.
+let DOF_Y = 0.27, DOF_NEAR = 0.30, DOF_FALL = 0.46;
 function initPost() {
   if (!gl) return;
   try {
@@ -571,38 +802,85 @@ function initPost() {
     gl.bindBuffer(gl.ARRAY_BUFFER, qvbo);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1]), gl.STATIC_DRAW);
     const qvs = 'attribute vec2 aP;varying vec2 vUV;void main(){vUV=aP*0.5+0.5;gl_Position=vec4(aP,0.0,1.0);}';
-    function mkProg(fs) {
-      const p = gl.createProgram();
-      const v = gl.createShader(gl.VERTEX_SHADER); gl.shaderSource(v, qvs); gl.compileShader(v);
-      const f = gl.createShader(gl.FRAGMENT_SHADER); gl.shaderSource(f, fs); gl.compileShader(f);
-      gl.attachShader(p, v); gl.attachShader(p, f); gl.linkProgram(p);
-      return { p, aP: gl.getAttribLocation(p, 'aP') };
-    }
-    const bright = mkProg('precision mediump float;varying vec2 vUV;uniform sampler2D uT;' +
-      'void main(){vec3 c=texture2D(uT,vUV).rgb;float l=dot(c,vec3(0.2126,0.7152,0.0722));' +
-      'float k=smoothstep(0.90,1.0,l);gl_FragColor=vec4(c*k*1.5,1.0);}');
-    const blur = mkProg('precision mediump float;varying vec2 vUV;uniform sampler2D uT;uniform vec2 uD;' +
-      'void main(){vec3 c=texture2D(uT,vUV).rgb*0.227;' +
-      'c+=(texture2D(uT,vUV+uD*1.384).rgb+texture2D(uT,vUV-uD*1.384).rgb)*0.316;' +
-      'c+=(texture2D(uT,vUV+uD*3.230).rgb+texture2D(uT,vUV-uD*3.230).rgb)*0.070;' +
-      'gl_FragColor=vec4(c,1.0);}');
-    const comp = mkProg('precision mediump float;varying vec2 vUV;uniform sampler2D uT;uniform sampler2D uB;' +
-      'void main(){vec3 c=texture2D(uT,vUV).rgb+texture2D(uB,vUV).rgb*1.25;' +
-      'vec2 q=vUV-0.5;float vig=1.0-0.32*smoothstep(0.28,0.85,dot(q,q)*2.2);' +
-      'gl_FragColor=vec4(c*vig,1.0);}');
-    bright.uT = gl.getUniformLocation(bright.p, 'uT');
-    blur.uT = gl.getUniformLocation(blur.p, 'uT');
-    blur.uD = gl.getUniformLocation(blur.p, 'uD');
-    comp.uT = gl.getUniformLocation(comp.p, 'uT');
-    comp.uB = gl.getUniformLocation(comp.p, 'uB');
-    post = { qvbo, bright, blur, comp, scene: null, bA: null, bB: null, w: 0, h: 0 };
+    const mkProg = (fs, us) => {
+      const p = link(qvs, FSP + fs);
+      if (!p) throw new Error('post shader');
+      const o = { p, aP: gl.getAttribLocation(p, 'aP') };
+      for (const u of us) o[u] = gl.getUniformLocation(p, u);
+      return o;
+    };
+    // HDR bright-pass. Thresholds on EXPOSED luminance, so the knee sits just past the
+    // brightest thing the tonemapper can still render as white: sunlit surfaces stay put,
+    // and only genuine lights spill. Emits pre-exposure colour so the composite can add it.
+    const bright = mkProg(
+      'varying vec2 vUV;uniform sampler2D uT;uniform vec3 uK;' + // (threshold, knee, exposure)
+      'void main(){vec3 c=texture2D(uT,vUV).rgb;' +
+      'float l=dot(c*uK.z,vec3(0.2126,0.7152,0.0722));' +
+      'float k=smoothstep(uK.x,uK.x+uK.y,l);' +
+      'gl_FragColor=vec4(c*k,1.0);}', ['uT', 'uK']);
+    // MIP-CHAIN BLOOM. The old fixed two-iteration quarter-res blur gave a tight, boxy
+    // halo. A progressive downsample/upsample pyramid gives what the reference has: a hot
+    // core with a soft, wide tail, at lower cost because most of the work happens tiny.
+    const down = mkProg( // 13-tap Jimenez downsample — no fireflies, no blocky quarter-res
+      'varying vec2 vUV;uniform sampler2D uT;uniform vec2 uD;' +
+      'void main(){vec2 t=uD;' +
+      'vec3 a=texture2D(uT,vUV+vec2(-2.0, 2.0)*t).rgb,b=texture2D(uT,vUV+vec2(0.0, 2.0)*t).rgb,c=texture2D(uT,vUV+vec2(2.0, 2.0)*t).rgb;' +
+      'vec3 d=texture2D(uT,vUV+vec2(-2.0, 0.0)*t).rgb,e=texture2D(uT,vUV).rgb,f=texture2D(uT,vUV+vec2(2.0, 0.0)*t).rgb;' +
+      'vec3 g=texture2D(uT,vUV+vec2(-2.0,-2.0)*t).rgb,h=texture2D(uT,vUV+vec2(0.0,-2.0)*t).rgb,i=texture2D(uT,vUV+vec2(2.0,-2.0)*t).rgb;' +
+      'vec3 j=texture2D(uT,vUV+vec2(-1.0, 1.0)*t).rgb,k=texture2D(uT,vUV+vec2(1.0, 1.0)*t).rgb;' +
+      'vec3 l=texture2D(uT,vUV+vec2(-1.0,-1.0)*t).rgb,m=texture2D(uT,vUV+vec2(1.0,-1.0)*t).rgb;' +
+      'vec3 r=e*0.125+(a+c+g+i)*0.03125+(b+d+f+h)*0.0625+(j+k+l+m)*0.125;' +
+      'gl_FragColor=vec4(r,1.0);}', ['uT', 'uD']);
+    const up = mkProg( // 9-tap tent, blended additively into the next mip up
+      'varying vec2 vUV;uniform sampler2D uT;uniform vec2 uD;' +
+      'void main(){vec2 t=uD;' +
+      'vec3 r=texture2D(uT,vUV+vec2(-1.0, 1.0)*t).rgb+texture2D(uT,vUV+vec2(1.0, 1.0)*t).rgb' +
+      '+texture2D(uT,vUV+vec2(-1.0,-1.0)*t).rgb+texture2D(uT,vUV+vec2(1.0,-1.0)*t).rgb;' +
+      'r+=(texture2D(uT,vUV+vec2(0.0, 1.0)*t).rgb+texture2D(uT,vUV+vec2(-1.0,0.0)*t).rgb' +
+      '+texture2D(uT,vUV+vec2(1.0,0.0)*t).rgb+texture2D(uT,vUV+vec2(0.0,-1.0)*t).rgb)*2.0;' +
+      'r+=texture2D(uT,vUV).rgb*4.0;' +
+      'gl_FragColor=vec4(r*0.0625,1.0);}', ['uT', 'uD']);
+    // COMPOSITE: tilt-shift DOF, bloom, exposure, ACES, grade, vignette, sRGB encode.
+    const comp = mkProg(
+      'varying vec2 vUV;uniform sampler2D uT;uniform sampler2D uB;uniform sampler2D uC;' +
+      'uniform vec2 uP;uniform vec3 uG;' +
+      'vec3 aces(vec3 x){return clamp((x*(2.51*x+0.03))/(x*(2.43*x+0.59)+0.14),0.0,1.0);}' +
+      'void main(){' +
+      // tilt-shift: a crisp band across the middle, falling off top and bottom. This is the
+      // cue that sells "miniature" — and the blurred buffer already exists for the bloom.
+      'float coc=smoothstep(uG.y,uG.y+uG.z,abs(vUV.y-uG.x));' +
+      'vec3 c=mix(texture2D(uT,vUV).rgb,texture2D(uC,vUV).rgb,coc*0.9);' +
+      'c+=texture2D(uB,vUV).rgb*uP.y;' +
+      'c=aces(c*uP.x);' +
+      // grade: saturation lift, soft contrast S-curve, cool shadows / warm highlights
+      'c=mix(vec3(dot(c,vec3(0.2126,0.7152,0.0722))),c,1.16);' +
+      'c=c*c*(3.0-2.0*c)*0.32+c*0.68;' +
+      'c+=vec3(-0.014,0.0,0.026)*(1.0-c);' +
+      'c+=vec3(0.022,0.006,-0.016)*c;' +
+      'vec2 q=vUV-0.5;' +
+      'c*=1.0-0.36*smoothstep(0.18,0.95,dot(q,q)*2.2);' +
+      'gl_FragColor=vec4(pow(max(c,0.0),vec3(0.4545)),1.0);}', ['uT', 'uB', 'uC', 'uP', 'uG']);
+    post = {
+      qvbo, bright, down, up, comp,
+      msaaOK: isGL2 && SAMPLES > 1,
+      scene: null, msaa: null, mips: [], dofA: null, dofB: null, w: 0, h: 0,
+    };
+    // no MSAA (WebGL1) => supersample instead, then let the composite's bilinear fetch
+    // resolve it. At exactly 2x that lands between texels and gives a free 2x2 box filter.
+    SS = post.msaaOK ? 1 : 1.6;
     sizePost();
-  } catch (e) { post = null; }
+    if (!post.scene) post = null;
+  } catch (e) { console.error('post init failed', e); post = null; }
 }
-function mkTarget(w, h, depth) {
+function mkTarget(w, h, depth, float) {
   const tex = gl.createTexture();
   gl.bindTexture(gl.TEXTURE_2D, tex);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+  if (float && hdrOK) {
+    if (isGL2) gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, w, h, 0, gl.RGBA, HALF, null);
+    else gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, HALF, null);
+  } else {
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+  }
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -613,27 +891,57 @@ function mkTarget(w, h, depth) {
   if (depth) {
     const rb = gl.createRenderbuffer();
     gl.bindRenderbuffer(gl.RENDERBUFFER, rb);
-    gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, w, h);
+    gl.renderbufferStorage(gl.RENDERBUFFER, isGL2 ? gl.DEPTH_COMPONENT24 : gl.DEPTH_COMPONENT16, w, h);
     gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, rb);
   }
+  const ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-  return { tex, fb, w, h };
+  return ok ? { tex, fb, w, h } : null;
+}
+function mkMS(w, h) { // multisampled color+depth renderbuffers (WebGL2 only)
+  const fb = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+  const cb = gl.createRenderbuffer();
+  gl.bindRenderbuffer(gl.RENDERBUFFER, cb);
+  gl.renderbufferStorageMultisample(gl.RENDERBUFFER, SAMPLES, hdrOK ? gl.RGBA16F : gl.RGBA8, w, h);
+  gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, cb);
+  const db = gl.createRenderbuffer();
+  gl.bindRenderbuffer(gl.RENDERBUFFER, db);
+  gl.renderbufferStorageMultisample(gl.RENDERBUFFER, SAMPLES, gl.DEPTH_COMPONENT24, w, h);
+  gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, db);
+  const ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  return ok ? { fb, w, h } : null;
 }
 function sizePost() {
   if (!post || !gl) return;
-  const w = Math.max(2, glc.width), h = Math.max(2, glc.height);
+  const bw = Math.max(2, glc.width), bh = Math.max(2, glc.height);
+  // supersampling is quadratic in cost — cap total scene pixels so phones don't fall over
+  let ss = SS;
+  const cap = 4.2e6;
+  if (bw * bh * ss * ss > cap) ss = Math.max(1, Math.sqrt(cap / (bw * bh)));
+  const w = Math.max(2, Math.round(bw * ss)), h = Math.max(2, Math.round(bh * ss));
   if (post.w === w && post.h === h) return;
   post.w = w; post.h = h;
-  post.scene = mkTarget(w, h, true);
-  post.bA = mkTarget(Math.max(2, w >> 2), Math.max(2, h >> 2), false);
-  post.bB = mkTarget(Math.max(2, w >> 2), Math.max(2, h >> 2), false);
+  post.scene = mkTarget(w, h, true, true);
+  post.msaa = post.msaaOK ? mkMS(w, h) : null;
+  // bloom pyramid: level 0 at half res, halving until it gets tiny
+  post.mips = [];
+  let mw = w >> 1, mh = h >> 1;
+  for (let i = 0; i < 6 && mw >= 8 && mh >= 8; i++) {
+    post.mips.push(mkTarget(mw, mh, false, true));
+    mw = Math.max(1, mw >> 1); mh = Math.max(1, mh >> 1);
+  }
+  post.dofA = mkTarget(Math.max(2, w >> 2), Math.max(2, h >> 2), false, true);
+  post.dofB = mkTarget(Math.max(2, w >> 3), Math.max(2, h >> 3), false, true);
 }
-function quadPass(pr, target, tex0, tex1, setup) {
+// where the scene pass renders: the multisampled buffer if we have one, else straight to
+// the resolve texture.
+const sceneFB = () => post && (post.msaa || post.scene);
+function quadPass(pr, target, tex0, tex1, setup, tex2) {
   gl.bindFramebuffer(gl.FRAMEBUFFER, target ? target.fb : null);
   gl.viewport(0, 0, target ? target.w : glc.width, target ? target.h : glc.height);
   gl.useProgram(pr.p);
-  gl.disableVertexAttribArray(loc.aNorm);
-  gl.disableVertexAttribArray(loc.aCol);
   gl.bindBuffer(gl.ARRAY_BUFFER, post.qvbo);
   gl.enableVertexAttribArray(pr.aP);
   gl.vertexAttribPointer(pr.aP, 2, gl.FLOAT, false, 0, 0);
@@ -644,25 +952,57 @@ function quadPass(pr, target, tex0, tex1, setup) {
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, tex1);
     gl.uniform1i(pr.uB, 1);
-    gl.activeTexture(gl.TEXTURE0);
   }
+  if (tex2 !== undefined) {
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, tex2);
+    gl.uniform1i(pr.uC, 2);
+  }
+  gl.activeTexture(gl.TEXTURE0);
   if (setup) setup();
   gl.drawArrays(gl.TRIANGLES, 0, 6);
 }
 function runPost() {
+  // resolve the multisampled scene into a sampleable texture
+  if (post.msaa) {
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, post.msaa.fb);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, post.scene.fb);
+    gl.blitFramebuffer(0, 0, post.w, post.h, 0, 0, post.w, post.h, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
   gl.disable(gl.DEPTH_TEST);
-  quadPass(post.bright, post.bA, post.scene.tex);
-  // two blur iterations: kills the boxy quarter-res look, keeps glow round and soft
-  quadPass(post.blur, post.bB, post.bA.tex, undefined, () => gl.uniform2f(post.blur.uD, 1.4 / post.bA.w, 0));
-  quadPass(post.blur, post.bA, post.bB.tex, undefined, () => gl.uniform2f(post.blur.uD, 0, 1.4 / post.bA.h));
-  quadPass(post.blur, post.bB, post.bA.tex, undefined, () => gl.uniform2f(post.blur.uD, 2.2 / post.bA.w, 0));
-  quadPass(post.blur, post.bA, post.bB.tex, undefined, () => gl.uniform2f(post.blur.uD, 0, 2.2 / post.bA.h));
-  quadPass(post.comp, null, post.scene.tex, post.bA.tex);
+  gl.disableVertexAttribArray(loc.aNorm);
+  gl.disableVertexAttribArray(loc.aCol);
+  gl.disableVertexAttribArray(loc.aEmis);
+  // HDR: threshold just past displayable white. LDR fallback has no headroom above 1.0,
+  // so it has to reach down below it and accept that bright props bloom a little too.
+  const M = post.mips, n = M.length;
+  const thr = hdrOK ? 1.25 : 0.80;
+  const tx = m => [1 / m.w, 1 / m.h];
+  // bright-pass straight into the top of the pyramid
+  quadPass(post.bright, M[0], post.scene.tex, undefined, () => gl.uniform3f(post.bright.uK, thr, 0.6, EXPOSURE));
+  // ...down the pyramid...
+  for (let i = 1; i < n; i++) {
+    quadPass(post.down, M[i], M[i - 1].tex, undefined, () => gl.uniform2f(post.down.uD, ...tx(M[i - 1])));
+  }
+  // ...and back up, adding each level into the one above it. That accumulation is what
+  // gives a bright core with a wide, soft tail instead of one uniform blur radius.
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.ONE, gl.ONE);
+  for (let i = n - 2; i >= 0; i--) {
+    quadPass(post.up, M[i], M[i + 1].tex, undefined, () => gl.uniform2f(post.up.uD, ...tx(M[i + 1])));
+  }
+  gl.disable(gl.BLEND);
+  // separate soft copy of the WHOLE scene (not just the bright bits) for the tilt-shift
+  quadPass(post.down, post.dofA, post.scene.tex, undefined, () => gl.uniform2f(post.down.uD, 1 / post.w, 1 / post.h));
+  quadPass(post.down, post.dofB, post.dofA.tex, undefined, () => gl.uniform2f(post.down.uD, ...tx(post.dofA)));
+  quadPass(post.comp, null, post.scene.tex, M[0].tex, () => {
+    gl.uniform2f(post.comp.uP, EXPOSURE, BLOOM);
+    gl.uniform3f(post.comp.uG, DOF_Y, DOF_NEAR, DOF_FALL);
+  }, post.dofB.tex);
   gl.enable(gl.DEPTH_TEST);
-  // restore the scene program's state for the next frame
   gl.useProgram(prog);
-  gl.enableVertexAttribArray(loc.aNorm);
-  gl.enableVertexAttribArray(loc.aCol);
+  bindSceneAttribs();
 }
 
 // ---------- 3D particles ----------
@@ -727,57 +1067,45 @@ let fovCur = 57, glOK = false, glowTilt = -1.15;
 function renderWorld(o) {
   if (!gl) return;
   glOK = true;
-  if (post && post.scene) {
-    sizePost();
-    gl.bindFramebuffer(gl.FRAMEBUFFER, post.scene.fb);
-    gl.viewport(0, 0, post.scene.w, post.scene.h);
-  } else {
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    gl.viewport(0, 0, glc.width, glc.height);
-  }
   const tod = TIMES[0]; // daytime-only for now (sunset/night shelved with the headlight)
   const sky = col3(tod.sky);
-  gl.clearColor(sky[0], sky[1], sky[2], 1);
-  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
   // route transform (straight stages for now; the bend machinery idles)
   const place = makePlace(o.corner || null, o.traveled);
   const pp0 = place(o.traveled, o.px); // player's rendered position
-  // top-down chase camera (reference style: steep pitch, ground fills the frame)
+  // Long-lens top-down camera. A 55deg lens from 24u up sheared every box at the frame
+  // edges and read like a phone camera; a ~30deg lens from 48u keeps edges near-parallel
+  // and gives the diorama-under-glass look the reference has.
   const pw = pp0.x;
-  const fovTarget = 55 + (o.boost ? 5 : 0);
+  const fovTarget = 36 + (o.boost ? 3 : 0);
   fovCur = lerp(fovCur, fovTarget, 0.1);
   const jx = shake > 0 ? rnd(-shake, shake) / 90 : 0;
   const jy = shake > 0 ? rnd(-shake, shake) / 110 : 0;
-  const eye = [pw * 0.16 + jx, 24.5 + jy, 5.6];
-  const cen = [pw * 0.22 + jx, 0, -5.4];
+  const eye = [pw * 0.16 + jx, 40 + jy, 12];
+  const cen = [pw * 0.22 + jx, 0, -12];
   glowTilt = -Math.atan2(eye[1] - cen[1], eye[2] - cen[2]); // billboards face THIS camera
   const up = [Math.sin(-worldRot * 0.3), 1, 0];
-  const proj = mPersp(fovCur * Math.PI / 180, glc.width / Math.max(1, glc.height), 3, 110);
+  const proj = mPersp(fovCur * Math.PI / 180, glc.width / Math.max(1, glc.height), 6, 190);
   lastVP = mMul(proj, mLookAt(eye, cen, up));
-  // globals
-  const ll = Math.hypot(0.45, 0.85, 0.3);
-  gl.uniform3f(loc.uLightDir, 0.45 / ll, 0.85 / ll, 0.3 / ll);
-  gl.uniform3fv(loc.uLightCol, tod.light);
-  gl.uniform1f(loc.uAmb, tod.amb);
-  gl.uniform3f(loc.uEye, eye[0], eye[1], eye[2]);
-  gl.uniform2f(loc.uFog, tod.fogN, tod.fogF);
-  gl.uniform3fv(loc.uFogCol, sky);
   const t = o.t, traveled = o.traveled;
   const turns = o.turns || [];
   const SEG_PX = SEG_LEN * PXU; // 192
   const nearTurnPx = p2 => turns.some(tn => Math.abs(tn.m * M2PX - p2) < 280);
+
+  // ---- all opaque geometry. Runs TWICE: once from the sun into the depth map, once from
+  // the camera. PASS tells drawModel which program and matrix it is feeding.
+  const drawGeo = () => {
   // ground continues under the haze (no horizon at this pitch)
-  drawModel(MOD.farground, 0, 0, -60);
+  drawModel(MOD.farground, 0, 0, -60, { noCast: true });
   // road segments + roadside plots
   const k0 = Math.floor((traveled - 320) / SEG_PX);
   for (let k = k0; k < k0 + 31; k++) {
     const segpx = k * SEG_PX + SEG_PX / 2;
     if (nearTurnPx(segpx)) continue;
     const pp = place(segpx, 0);
-    drawModel(MOD.seg, pp.x, 0, pp.z, { ry: pp.yaw });
+    drawModel(MOD.segs[Math.floor(hash(k * 3 + 1) * NSEG)], pp.x, 0, pp.z, { ry: pp.yaw });
     for (let side = 0; side < 2; side++) {
       const v = Math.floor(hash(k * 2 + side + 7) * MOD.plots.length);
-      const pq = place(segpx, side ? 403 : -403);
+      const pq = place(segpx, side ? PLOT_X : -PLOT_X);
       drawModel(MOD.plots[v], pq.x, 0, pq.z, { ry: pq.yaw });
     }
   }
@@ -787,10 +1115,10 @@ function renderWorld(o) {
       const sF = place.S + 330 + j * SEG_PX + SEG_PX / 2;
       for (const mode of [1, 2]) {
         const pp = place(sF, 0, mode);
-        drawModel(MOD.seg, pp.x, 0, pp.z, { ry: pp.yaw });
+        drawModel(MOD.segs[Math.floor(hash(j * 3 + mode) * NSEG)], pp.x, 0, pp.z, { ry: pp.yaw });
         for (let side = 0; side < 2; side++) {
           const v = Math.floor(hash(j * 5 + side * 3 + mode * 11) * MOD.plots.length);
-          const pq = place(sF, side ? 403 : -403, mode);
+          const pq = place(sF, side ? PLOT_X : -PLOT_X, mode);
           drawModel(MOD.plots[v], pq.x, 0, pq.z, { ry: pq.yaw });
         }
       }
@@ -824,28 +1152,26 @@ function renderWorld(o) {
     const pp = place(e.y, e.x);
     const x = pp.x, z = pp.z, yw = pp.yaw;
     if (e.type === 'car') {
-      drawModel(MOD.shadow, x + 0.06, 0.03, z + 0.06, { s: [1.75, 1, 2.95], ry: yw });
-      drawModel(carModel(e.col || CARCOLS[0]), x, 0, z, { ry: yw });
+      if (!shadowsOK) drawModel(MOD.shadow, x + 0.06, 0.03, z + 0.06, { s: [1.75, 1, 2.95], ry: yw, noCast: true });
+      drawModel(carModel(e.col || CARCOLS[0]), x, 0, z, { ry: yw, spec: 0.42 });
     } else if (e.type === 'cop') {
-      drawModel(MOD.shadow, x + 0.06, 0.03, z + 0.06, { s: [1.75, 1, 2.95], ry: yw });
-      drawModel(Math.floor(t * 5) % 2 ? MOD.copA : MOD.copB, x, 0, z, { ry: yw });
+      if (!shadowsOK) drawModel(MOD.shadow, x + 0.06, 0.03, z + 0.06, { s: [1.75, 1, 2.95], ry: yw, noCast: true });
+      drawModel(Math.floor(t * 5) % 2 ? MOD.copA : MOD.copB, x, 0, z, { ry: yw, spec: 0.42 });
     } else if (e.type === 'barrier') {
-      drawModel(MOD.shadow, x + 0.05, 0.03, z, { s: [2.1, 1, 0.55], ry: yw });
+      if (!shadowsOK) drawModel(MOD.shadow, x + 0.05, 0.03, z, { s: [2.1, 1, 0.55], ry: yw, noCast: true });
       drawModel(MOD.barrier, x, 0, z, { ry: yw });
       if (Math.floor(t * 3 + e.y * 0.01) % 2) drawModel(MOD.blink, x, 1.28, z);
     } else if (e.type === 'pothole') {
       drawModel(MOD.pothole, x, 0, z, { ry: yw });
     } else if (e.type === 'slice') {
-      drawModel(MOD.shadow, x, 0.03, z, { s: [0.7, 1, 0.7] });
-      drawModel(MOD.slice, x, 0.55 + Math.sin(t * 4 + e.y * 0.02) * 0.12, z, { ry: t * 2.4 + e.y * 0.01, tint: [1.18, 1.12, 1.0] });
+      if (!shadowsOK) drawModel(MOD.shadow, x, 0.03, z, { s: [0.7, 1, 0.7], noCast: true });
+      drawModel(MOD.slice, x, 0.55 + Math.sin(t * 4 + e.y * 0.02) * 0.12, z, { ry: t * 2.4 + e.y * 0.01, spec: 0.3 });
     } else if (e.type === 'stick') {
-      drawModel(MOD.shadow, x, 0.03, z, { s: [0.85, 1, 0.55] });
-      // self-lit: bypass scene lighting so the stick itself glows, day or night
-      gl.uniform1f(loc.uAmb, 1);
-      gl.uniform3fv(loc.uLightCol, WHITE_TINT);
-      drawModel(MOD.stick, x, 0.72 + Math.sin(t * 4 + e.y * 0.02) * 0.1, z, { ry: t * 1.8 + e.y * 0.01, rz: 0.1, s: 1.3, tint: [1.16, 1.04, 0.6] });
-      gl.uniform1f(loc.uAmb, tod.amb);
-      gl.uniform3fv(loc.uLightCol, tod.light);
+      if (!shadowsOK) drawModel(MOD.shadow, x, 0.03, z, { s: [0.85, 1, 0.55], noCast: true });
+      // The stick's emission is baked into the model now (aEmis), so it self-lights through
+      // the normal path and lands above 1.0 — no more faking full-bright with uAmb=1.
+      const pulse = 0.85 + Math.sin(t * 6 + e.y * 0.03) * 0.15;
+      drawModel(MOD.stick, x, 0.72 + Math.sin(t * 4 + e.y * 0.02) * 0.1, z, { ry: t * 1.8 + e.y * 0.01, rz: 0.1, s: 1.3, emis: pulse });
     } else if (e.type === 'trap') {
       const pb2 = place(e.y, 0);
       if (Math.floor(t * 4) % 2 === 0) drawModel(MOD.beam, pb2.x, 0.55, pb2.z, { ry: pb2.yaw });
@@ -859,13 +1185,13 @@ function renderWorld(o) {
   for (const pf of puffs) {
     if (pf.t > 0.85) continue;
     const pp = place(pf.s, pf.x);
-    drawModel(MOD.puff, pp.x, 0.06, pp.z, { s: 0.7 + pf.t * 1.3, ry: pf.r });
+    drawModel(MOD.puff, pp.x, 0.06, pp.z, { s: 0.7 + pf.t * 1.3, ry: pf.r, noCast: true });
   }
   // player — always at the origin of the bent frame
   if (o.player) {
     const cr = o.player.crash;
     const blinkOff = !cr && o.player.blink && Math.floor(t * 18) % 2 === 0;
-    drawModel(o.player.arriving ? MOD.walkShadow : MOD.shadow, pp0.x + 0.05, 0.035, pp0.z + 0.05 - (cr ? cr.dz : 0), { s: [1.0, 1, 1.9], ry: pp0.yaw });
+    if (!shadowsOK) drawModel(o.player.arriving ? MOD.walkShadow : MOD.shadow, pp0.x + 0.05, 0.035, pp0.z + 0.05 - (cr ? cr.dz : 0), { s: [1.0, 1, 1.9], ry: pp0.yaw, noCast: true });
     if (!blinkOff) {
       if (cr) {
         drawModel(scooterModel(o.player.skin), pp0.x, cr.y, pp0.z - cr.dz, { rx: cr.rx, ry: cr.ry, rz: cr.rz, s: 0.92 });
@@ -881,47 +1207,93 @@ function renderWorld(o) {
   }
   // 3D particles
   for (const p of parts3) {
-    drawModel(MOD.cube, p.x, p.y, p.z, { s: p.s, ry: p.ry, tint: p.tint });
+    drawModel(MOD.cube, p.x, p.y, p.z, { s: p.s, ry: p.ry, tint: p.tint, noCast: true });
   }
-  // ---- glow pass: additive light. No depth test — light never gets clipped by geometry.
+  }; // end drawGeo
+
+  // ---- shadow pass: the world, from the sun's point of view, depth only.
+  if (shadowsOK) {
+    buildLightVP(tod.sun, pw * 0.2);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, sm.fb);
+    gl.viewport(0, 0, SM_SIZE, SM_SIZE);
+    gl.clear(gl.DEPTH_BUFFER_BIT);
+    gl.useProgram(sprog);
+    gl.disableVertexAttribArray(loc.aNorm);
+    gl.disableVertexAttribArray(loc.aCol);
+    gl.disableVertexAttribArray(loc.aEmis);
+    PASS = 1;
+    drawGeo();
+    PASS = 0;
+    gl.useProgram(prog);
+    bindSceneAttribs();
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, sm.tex);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.uniformMatrix4fv(loc.uLightVP, false, lightVP);
+  }
+  gl.uniform2f(loc.uSM, 1 / SM_SIZE, shadowsOK ? 1 : 0);
+
+  // ---- scene pass
+  const fb = sceneFB();
+  if (fb) {
+    sizePost();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, sceneFB().fb);
+    gl.viewport(0, 0, post.w, post.h);
+  } else {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, glc.width, glc.height);
+  }
+  gl.clearColor(sky[0], sky[1], sky[2], 1);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  gl.uniform3fv(loc.uLightDir, tod.sun);
+  gl.uniform3fv(loc.uLightCol, tod.light);
+  gl.uniform3fv(loc.uAmbCol, tod.amb);
+  gl.uniform3f(loc.uEye, eye[0], eye[1], eye[2]);
+  gl.uniform2f(loc.uFog, tod.fogN, tod.fogF);
+  gl.uniform3fv(loc.uFogCol, sky);
+  drawGeo();
+
+  // ---- glow pass: additive HDR light. No depth test — light never gets clipped by geometry.
+  // Killing the light terms means these billboards contribute PURE emission: no ambient, no
+  // sun, no fog. They are light, not surfaces, and their energy is free to exceed 1.0.
   gl.depthMask(false);
   gl.disable(gl.DEPTH_TEST);
   gl.disable(gl.CULL_FACE);
   gl.enable(gl.BLEND);
   gl.blendFunc(gl.ONE, gl.ONE);
-  gl.uniform1f(loc.uAmb, 1);
-  gl.uniform3f(loc.uLightCol, 1, 1, 1);
+  gl.uniform3f(loc.uAmbCol, 0, 0, 0);
+  gl.uniform3f(loc.uLightCol, 0, 0, 0);
   gl.uniform2f(loc.uFog, 9999, 10000); // fog would lift the black disc rims to sky color
-  const glow = (x, y, z, s, tint) => drawModel(MOD.disc, x, y, z, { s, tint, rx: glowTilt });
+  gl.uniform2f(loc.uSM, 1 / SM_SIZE, 0); // pure emission: nothing to shadow, skip the taps
+  const glow = (x, y, z, s, tint, i) => drawModel(MOD.disc, x, y, z, { s, tint, emis: i, rx: glowTilt });
+  const pool = (x, z, s, tint, i) => drawModel(MOD.disc, x, 0.05, z, { s, tint, emis: i, rx: -Math.PI / 2 });
+  const HOT_RED = [1.0, 0.10, 0.05], HOT_BLUE = [0.16, 0.30, 1.0], GOLDY = [1.0, 0.66, 0.16], FIRE = [1.0, 0.42, 0.10];
   for (const e of (o.entities || [])) {
     const dz = e.y - traveled;
     if (dz < -280 || dz > 2800) continue;
     const pp = place(e.y, e.x);
     if (e.type === 'stick') {
       const yb = 0.72 + Math.sin(t * 4 + e.y * 0.02) * 0.1;
-      const pulse = (0.8 + Math.sin(t * 6 + e.y * 0.03) * 0.2) * clamp(dz / 380, 0.12, 1);
-      glow(pp.x, yb, pp.z, 2.2, [0.5 * pulse, 0.36 * pulse, 0.12 * pulse]);
-      glow(pp.x, yb, pp.z, 1.0, [0.36 * pulse, 0.29 * pulse, 0.11 * pulse]); // hot inner halo
-      // warm pool on the road beneath it
-      drawModel(MOD.disc, pp.x, 0.05, pp.z, { s: [1.9, 1, 1.4], rx: -Math.PI / 2, tint: [0.2 * pulse, 0.15 * pulse, 0.05 * pulse] });
-      // twin orbiting sparkles (reference has little + twinkles around the breadstick)
+      const pulse = (0.85 + Math.sin(t * 6 + e.y * 0.03) * 0.15) * clamp(dz / 380, 0.15, 1);
+      glow(pp.x, yb, pp.z, 1.5, GOLDY, 0.20 * pulse);   // soft aura
+      glow(pp.x, yb, pp.z, 0.75, GOLDY, 0.34 * pulse);  // hot inner halo
+      // twin orbiting sparkles
       const oa = t * 3.2 + e.y * 0.05;
-      glow(pp.x + Math.cos(oa) * 0.95, yb + 0.15 + Math.sin(oa * 1.7) * 0.3, pp.z + Math.sin(oa) * 0.4, 0.36, [0.7 * pulse, 0.58 * pulse, 0.26 * pulse]);
-      glow(pp.x - Math.cos(oa * 0.8) * 0.9, yb - 0.1 + Math.cos(oa * 1.3) * 0.3, pp.z - Math.sin(oa * 0.8) * 0.4, 0.3, [0.6 * pulse, 0.5 * pulse, 0.22 * pulse]);
-    } else if (e.type === 'car') { // glowing taillights (reference)
-      glow(pp.x - 0.48, 0.55, pp.z + 1.42, 0.55, [0.9, 0.14, 0.1]);
-      glow(pp.x + 0.48, 0.55, pp.z + 1.42, 0.55, [0.9, 0.14, 0.1]);
+      glow(pp.x + Math.cos(oa) * 0.95, yb + 0.15 + Math.sin(oa * 1.7) * 0.3, pp.z + Math.sin(oa) * 0.4, 0.3, [1.0, 0.84, 0.42], 0.7 * pulse);
+      glow(pp.x - Math.cos(oa * 0.8) * 0.9, yb - 0.1 + Math.cos(oa * 1.3) * 0.3, pp.z - Math.sin(oa * 0.8) * 0.4, 0.24, [1.0, 0.84, 0.42], 0.6 * pulse);
+    } else if (e.type === 'car') { // glowing taillights
+      glow(pp.x - 0.48, 0.55, pp.z + 1.42, 0.5, HOT_RED, 1.5);
+      glow(pp.x + 0.48, 0.55, pp.z + 1.42, 0.5, HOT_RED, 1.5);
     } else if (e.type === 'cop') {
       const ph2 = Math.floor(t * 5) % 2;
-      glow(pp.x - 0.48, 0.55, pp.z + 1.42, 0.55, [0.9, 0.14, 0.1]);
-      glow(pp.x + 0.48, 0.55, pp.z + 1.42, 0.55, [0.9, 0.14, 0.1]);
-      glow(pp.x + (ph2 ? -0.25 : 0.25), 1.55, pp.z + 0.1, 1.5, ph2 ? [0.95, 0.14, 0.18] : [0.2, 0.32, 1.0]);
-      // colored pool on the road around the car
-      drawModel(MOD.disc, pp.x, 0.05, pp.z, { s: [3.4, 1, 4.4], rx: -Math.PI / 2, tint: ph2 ? [0.22, 0.03, 0.04] : [0.05, 0.08, 0.24] });
+      glow(pp.x - 0.48, 0.55, pp.z + 1.42, 0.5, HOT_RED, 1.5);
+      glow(pp.x + 0.48, 0.55, pp.z + 1.42, 0.5, HOT_RED, 1.5);
+      glow(pp.x + (ph2 ? -0.25 : 0.25), 1.55, pp.z + 0.1, 1.4, ph2 ? HOT_RED : HOT_BLUE, 1.7);
+      pool(pp.x, pp.z, [3.4, 1, 4.4], ph2 ? HOT_RED : HOT_BLUE, 0.30);
     } else if (e.type === 'barrier') {
       if (Math.floor(t * 3 + e.y * 0.01) % 2) {
-        glow(pp.x, 1.32, pp.z, 0.85, [0.95, 0.68, 0.16]);
-        drawModel(MOD.disc, pp.x, 0.05, pp.z, { s: [2.6, 1, 1.8], rx: -Math.PI / 2, tint: [0.2, 0.14, 0.03] });
+        glow(pp.x, 1.32, pp.z, 0.85, GOLDY, 2.0);
+        pool(pp.x, pp.z, [2.6, 1, 1.8], GOLDY, 0.24);
       }
     }
   }
@@ -929,15 +1301,18 @@ function renderWorld(o) {
   if (o.player) {
     if (o.boost && !o.player.crash) {
       const fk = 0.7 + Math.sin(t * 30) * 0.3;
-      glow(pp0.x, 0.35, pp0.z + 1.45, 0.9, [0.8 * fk, 0.42 * fk, 0.1 * fk]);
-      drawModel(MOD.disc, pp0.x, 0.05, pp0.z + 1.5, { s: [1.3, 1, 2.2], rx: -Math.PI / 2, tint: [0.3 * fk, 0.16 * fk, 0.04 * fk] });
+      glow(pp0.x, 0.35, pp0.z + 1.45, 0.9, FIRE, 2.0 * fk);
+      pool(pp0.x, pp0.z + 1.5, [1.3, 1, 2.2], FIRE, 0.5 * fk);
     }
     if (o.player.crash) {
       const cf = Math.max(0, 1 - o.player.crash.rx / 5);
-      glow(pp0.x, 0.8, pp0.z - o.player.crash.dz, 4.5 * (1 - cf * 0.4), [1.0 * cf, 0.36 * cf, 0.08 * cf]);
-      drawModel(MOD.disc, pp0.x, 0.05, pp0.z - o.player.crash.dz, { s: [5, 1, 4], rx: -Math.PI / 2, tint: [0.4 * cf, 0.14 * cf, 0.03 * cf] });
+      glow(pp0.x, 0.8, pp0.z - o.player.crash.dz, 4.5 * (1 - cf * 0.4), FIRE, 3.4 * cf);
+      pool(pp0.x, pp0.z - o.player.crash.dz, [5, 1, 4], FIRE, 0.9 * cf);
     }
   }
+  gl.uniform3fv(loc.uAmbCol, tod.amb);
+  gl.uniform3fv(loc.uLightCol, tod.light);
+  gl.uniform2f(loc.uFog, tod.fogN, tod.fogF);
   gl.disable(gl.BLEND);
   gl.enable(gl.CULL_FACE);
   gl.enable(gl.DEPTH_TEST);

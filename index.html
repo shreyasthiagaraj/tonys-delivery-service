@@ -1229,6 +1229,9 @@ let fovCur = 57, glOK = false, glowTilt = -1.15;
 // NEAR-MISS CINEMATIC. Squeeze past a car and the world goes briefly slow and streaky while
 // you stay sharp. Costs almost nothing (the composite was already resampling the scene) and
 // it is the single best clip-generator in the game — it turns a skilled dodge into a moment.
+// Near-miss mechanic (combo + "NEAR MISS" popup + slow-mo cinematic) is disabled. Flip to
+// re-enable everything: the detection gate below is the only switch.
+const NEAR_MISS = false;
 let cine = 0, streak = 0, playerUV = [0.5, 0.25];
 const MASTER_VOL = 0.55;
 function nearMissCine(combo) {
@@ -2160,7 +2163,7 @@ function updatePlay(dt) {
     // solid obstacles
     if (!e.passed && dz < -55) {
       e.passed = true;
-      if (!e.hit && player.inv <= 0 && Math.abs(e.x - player.x) > 58 && Math.abs(e.x - player.x) < 155) {
+      if (NEAR_MISS && !e.hit && player.inv <= 0 && Math.abs(e.x - player.x) > 58 && Math.abs(e.x - player.x) < 155) {
         player.combo++; player.comboT = 3.5;
         run.bestCombo = Math.max(run.bestCombo, player.combo);
         run.score += 5 * player.combo;

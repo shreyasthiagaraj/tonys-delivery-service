@@ -1648,6 +1648,53 @@ const sfx = {
   row()    { tone(660, 0.06, 'square', 0.12); },
   near(n)  { tone(520 + Math.min(n, 8) * 75, 0.07, 'square', 0.13); tone(780 + Math.min(n, 8) * 75, 0.08, 'square', 0.11, 0, 0.05); },
 };
+// ---------- scooter engine (procedural): RPM, grit and putt-putt that track speed ----------
+// A moped two-stroke, synthesised: two detuned oscillators + a sub + filtered noise, with an
+// amplitude LFO for the putt-putt. Pitch, brightness, LFO rate and volume all rise with speed
+// and jump on boost — so you HEAR how fast you're going, idling on the menus at zero gain.
+let eng = null;
+function ensureEngine() {
+  if (eng || !actx) return;
+  try {
+    const g = actx.createGain(); g.gain.value = 0;                 // engine master (0 = silent)
+    const lp = actx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 500;
+    g.connect(lp); lp.connect(master);
+    const o1 = actx.createOscillator(); o1.type = 'sawtooth';
+    const o2 = actx.createOscillator(); o2.type = 'square'; o2.detune.value = -14;
+    const sub = actx.createOscillator(); sub.type = 'sine';
+    const mix = actx.createGain(); mix.gain.value = 0.55;
+    o1.connect(mix); o2.connect(mix); mix.connect(g);
+    const subg = actx.createGain(); subg.gain.value = 0.5; sub.connect(subg); subg.connect(g);
+    // grit: a looping noise bed through a bandpass
+    const nlen = Math.floor(actx.sampleRate * 1.0);
+    const nbuf = actx.createBuffer(1, nlen, actx.sampleRate);
+    const nd = nbuf.getChannelData(0); for (let i = 0; i < nlen; i++) nd[i] = Math.random() * 2 - 1;
+    const ns = actx.createBufferSource(); ns.buffer = nbuf; ns.loop = true;
+    const nbp = actx.createBiquadFilter(); nbp.type = 'bandpass'; nbp.frequency.value = 900; nbp.Q.value = 0.7;
+    const ng = actx.createGain(); ng.gain.value = 0.14; ns.connect(nbp); nbp.connect(ng); ng.connect(g);
+    // putt-putt: an LFO tremolo on the oscillator mix
+    const lfo = actx.createOscillator(); lfo.type = 'sine';
+    const lfog = actx.createGain(); lfog.gain.value = 0.32; lfo.connect(lfog); lfog.connect(mix.gain);
+    o1.start(); o2.start(); sub.start(); ns.start(); lfo.start();
+    eng = { g, lp, o1, o2, sub, lfo };
+  } catch (e) { eng = null; }
+}
+const engine = {
+  update(frac, boost, active) {
+    ensureEngine();
+    if (!eng || !actx) return;
+    const now = actx.currentTime;
+    const rpm = clamp(frac, 0, 2);                       // 0 idle .. ~1.72 boosting
+    const base = 46 + rpm * 50 + (boost ? 14 : 0);       // Hz — the fundamental "engine note"
+    eng.o1.frequency.setTargetAtTime(base, now, 0.05);
+    eng.o2.frequency.setTargetAtTime(base * 1.5, now, 0.05);
+    eng.sub.frequency.setTargetAtTime(base * 0.5, now, 0.05);
+    eng.lp.frequency.setTargetAtTime(340 + rpm * 900 + (boost ? 500 : 0), now, 0.06);
+    eng.lfo.frequency.setTargetAtTime(7 + rpm * 19, now, 0.05); // putt-putt speeds up with revs
+    const vol = (active && S.sound) ? (0.05 + rpm * 0.06 + (boost ? 0.03 : 0)) : 0;
+    eng.g.gain.setTargetAtTime(vol, now, active ? 0.05 : 0.12);
+  },
+};
 // tarantella-ish loop in A minor, 6/8 feel
 const NOTE = m => 440 * Math.pow(2, (m - 69) / 12);
 const MEL  = [69, 71, 72, 71, 69, 64, 69, 71, 72, 74, 72, 71, 72, 71, 69, 67, 69, 71, 69, 0, 76, 0, 74, 72];
@@ -1704,25 +1751,35 @@ function tony(kind, speak) {
   if (speak !== false) say(txt);
 }
 // ---------- input ----------
-let ptr = { down: false, x0: 0, y0: 0, swiped: false, t0: 0 };
+let ptr = { down: false, ax: 0, ay: 0, cx: 0, cy: 0, swiped: false, t0: 0 };
 let boostTouch = false, boostKey = false;
 const isBoost = () => (boostTouch || boostKey) && state === 'play';
 let buttons = [];
+const LANE_STEP = 64; // px of horizontal thumb travel per lane, within one continuous touch
 function pointerDown(x, y) {
   initAudio();
   if (actx && actx.state === 'suspended') { try { actx.resume(); } catch (e) {} }
-  ptr = { down: true, x0: x, y0: y, swiped: false, t0: performance.now() };
+  ptr = { down: true, ax: x, ay: y, cx: x, cy: y, swiped: false, t0: performance.now() };
   if (state === 'play') boostTouch = true;
 }
 function pointerMove(x, y) {
-  if (!ptr.down || ptr.swiped) return; // ONE lane per gesture: fire once, then wait for lift
-  const dx = x - ptr.x0, dy = y - ptr.y0;
-  // A whole pan gesture — however long — moves exactly one lane. To move another the player
-  // must release and swipe again. No re-anchoring, no lane-by-lane crawl on a held pan.
-  if (Math.abs(dx) > 40 && Math.abs(dx) > Math.abs(dy) * 1.15) {
-    onSwipe(dx > 0 ? 1 : -1);
-    ptr.swiped = true;
-  }
+  if (!ptr.down) return;
+  ptr.cx = x; ptr.cy = y; // the ratchet runs per-frame in panRatchet(), off this position
+}
+// A continuous touch can step through several lanes WITHOUT lifting: every LANE_STEP of
+// horizontal travel is one lane, and the anchor jumps to the thumb only when a lane actually
+// fires. So a quick flick moves one lane and stops (the anchor caught up); to move another
+// the thumb must travel a fresh LANE_STEP. Anything shorter is a dead-zone, so minute panning
+// does nothing, and the settle gate keeps one flick from being read as two.
+function panRatchet() {
+  if (!ptr.down || !player || run.crashing) return;
+  const dx = ptr.cx - ptr.ax, dy = ptr.cy - ptr.ay;
+  if (Math.abs(dx) < LANE_STEP || Math.abs(dx) <= Math.abs(dy) * 1.1) return;
+  const settled = tGlobal - lastLaneAt > 0.17 && Math.abs(player.x - laneX(player.tlane)) < 26;
+  if (!settled) return; // a single fast pan can't sneak a second lane in before the first lands
+  const nt = clamp(player.tlane + (dx > 0 ? 1 : -1), 0, 2);
+  if (nt !== player.tlane) { player.tlane = nt; lastLaneAt = tGlobal; sfx.whoosh(); ptr.swiped = true; }
+  ptr.ax = ptr.cx; ptr.ay = ptr.cy; // re-anchor: the next lane needs a fresh LANE_STEP
 }
 function pointerUp(x, y) {
   boostTouch = false;
@@ -1829,6 +1886,7 @@ function startRun(lvl) {
     lvl, distM, elapsed: 0, traveled: 0, speed: 0, baseSpeed,
     score: 0, sticks: 0, sticksSeen: 0, bestCombo: 0,
     turns: [], ti: 0, corner: null, nextSpawn: 700,
+    lastOpen: 1, restDebt: 0, // spawn director: last guaranteed-clear lane + forced rest beats
     timeLimit: (distM * M2PX) / baseSpeed * 1.42 + 3, lastTickSec: 99,
     order: pendingOrder || makeOrder(lvl), arriving: false, over: false,
     crashing: false, crashT: 0, failKind: null,
@@ -1853,86 +1911,71 @@ function ent(type, lane, y, extra) {
   return e;
 }
 const diff = () => run ? clamp((run.lvl - 1) / 11, 0, 1) : 0;
+// A breadstick trail weaving from one lane to another over `n` pickups.
+function trail(y, from, to, n) {
+  n = n || 5;
+  for (let i = 0; i < n; i++) {
+    const l = Math.round(lerp(from, to, n > 1 ? i / (n - 1) : 0));
+    ent('stick', l, y + i * 58);
+  }
+}
+// SPAWN DIRECTOR. Every run reads as: easy open stretches you can boost through, then a fair
+// obstacle you can always thread, then room to breathe again. Guarantees, not vibes:
+//   - never blocks all three lanes; the open lane is always adjacent to the last one, so it
+//     is reachable in the distance available;
+//   - forces a rest beat after every cluster, so there is always somewhere to feel speed;
+//   - breadsticks live ONLY on the open path (the lead-in to the gap, or a rest-stretch
+//     trail) — never stranded in a lane behind an obstacle;
+//   - difficulty ramps from the level AND from progress into the run, and every run eases in.
 function spawnPattern(y) {
-  const d = diff();
-  const r = Math.random();
-  // first delivery opens fail-proof: treats only for the first stretch
-  if (run.lvl === 1 && S.delivered === 0 && y < 2300) {
-    if (r < 0.5) {
-      const dir = Math.random() < 0.5 ? 1 : -1;
-      for (let i = 0; i < 6; i++) {
-        const l = clamp(dir > 0 ? Math.floor(i / 2) : 2 - Math.floor(i / 2), 0, 2);
-        ent('stick', l, y + i * 56);
-      }
-      return 340;
-    }
-    const l0 = ri(0, 2);
-    for (let i = 0; i < 5; i++) ent('stick', l0, y + i * 64);
-    return 320;
+  // first delivery: treats only, so a new player learns the controls without dying
+  if (run.lvl === 1 && S.delivered === 0 && y < 2100) {
+    const to = clamp(run.lastOpen + pick([-1, 0, 1]), 0, 2);
+    trail(y, run.lastOpen, to, 5);
+    run.lastOpen = to;
+    return 360;
   }
-  if (r < 0.14) { // breadstick arc weaving across lanes
-    const dir = Math.random() < 0.5 ? 1 : -1;
-    for (let i = 0; i < 6; i++) {
-      const l = clamp(dir > 0 ? Math.floor(i / 2) : 2 - Math.floor(i / 2), 0, 2);
-      ent('stick', l, y + i * 56);
-    }
-    return 340;
-  }
-  if (r < 0.26) { // breadstick line
-    const l = ri(0, 2);
-    for (let i = 0; i < 5; i++) ent('stick', l, y + i * 64);
-    return 320;
-  }
-  if (r < 0.42) { // single car (sometimes with a treat behind)
-    const l = ri(0, 2);
-    ent('car', l, y, { col: pick(CARCOLS) });
-    if (Math.random() < 0.4) ent('stick', (l + ri(1, 2)) % 3, y + 60);
-    return 0;
-  }
-  if (r < 0.54) { // roadwork barrier
-    ent('barrier', ri(0, 2), y);
-    return 0;
-  }
-  if (r < 0.54 + 0.14 * d + 0.04) { // wall with one gap, treats in the gap
-    const gap = ri(0, 2);
-    for (let l = 0; l < 3; l++) {
-      if (l === gap) continue;
-      Math.random() < 0.5 ? ent('car', l, y, { col: pick(CARCOLS) }) : ent('barrier', l, y);
-    }
-    for (let i = 0; i < 3; i++) ent('stick', gap, y - 20 + i * 46);
-    return 140;
-  }
-  if (r < 0.72 + 0.06 * d) { // slalom
-    let l = ri(0, 2);
-    for (let i = 0; i < 3; i++) {
-      ent(Math.random() < 0.7 ? 'car' : 'barrier', l, y + i * 240, { col: pick(CARCOLS) });
-      const nl = clamp(l + (l === 0 ? 1 : l === 2 ? -1 : (Math.random() < 0.5 ? 1 : -1)), 0, 2);
-      if (i < 2) ent('stick', nl, y + i * 240 + 120);
-      l = nl;
-    }
-    return 500;
-  }
-  if (r < 0.80 + 0.04 * d) { // parked cop
-    ent('cop', ri(0, 2), y, { col: '#F2F4F8' });
-    return 0;
-  }
-  if (r < 0.86 && d > 0.08) { // speed trap zone
+  const base = clamp((run.lvl - 1) / 11, 0, 1);
+  const prog = clamp(run.traveled / (run.distM * M2PX), 0, 1);
+  const warm = clamp((y - 600) / 1500, 0, 1);        // first ~1500px of every run starts gentle
+  const D = clamp(0.12 + base * 0.52 + prog * 0.36, 0, 1) * warm;
+
+  // occasional speed trap (a "don't boost here" beat) — its own thing, needs room around it
+  if (base > 0.12 && D > 0.32 && Math.random() < 0.06) {
     ent('trap', 1, y, { busted: 0 });
-    return 60;
+    run.restDebt = 1;
+    return 460;
   }
-  if (r < 0.94) { // pothole cluster
-    ent('pothole', ri(0, 2), y);
-    if (Math.random() < 0.5) ent('pothole', ri(0, 2), y + 90);
-    return 40;
+
+  // REST BEAT — breathing room. Guaranteed after a cluster (restDebt), common when easy.
+  const restChance = 0.52 - D * 0.34;
+  if (run.restDebt > 0 || Math.random() < restChance) {
+    run.restDebt = Math.max(0, run.restDebt - 1);
+    if (Math.random() < 0.72) { // lay a stick trail that also nudges you toward a fresh lane
+      const to = clamp(run.lastOpen + pick([-1, 0, 1]), 0, 2);
+      trail(y, run.lastOpen, to, 5);
+      run.lastOpen = to;
+    }
+    return lerp(560, 300, D); // long open stretch when easy, tighter when hard — but always room
   }
-  if (d > 0.25) { // drifting car with blinker
-    const from = ri(0, 2);
-    const to = clamp(from + (from === 0 ? 1 : from === 2 ? -1 : (Math.random() < 0.5 ? 1 : -1)), 0, 2);
-    ent('car', from, y, { col: pick(CARCOLS), vy: run.baseSpeed * 0.3, driftTo: to, driftP: 0, drifting: false });
-    return 80;
+
+  // OBSTACLE BEAT — block one lane (easy) or two (hard), always leaving a reachable gap.
+  const blockTwo = Math.random() < D * 0.7;
+  const open = clamp(run.lastOpen + pick([-1, 0, 1]), 0, 2); // gap stays adjacent = threadable
+  const blocked = [0, 1, 2].filter(l => l !== open);
+  const rows = blockTwo ? blocked : [pick(blocked)];
+  for (const l of rows) {
+    const roll = Math.random();
+    if (roll < 0.48) ent('car', l, y, { col: pick(CARCOLS) });
+    else if (roll < 0.74) ent('barrier', l, y);
+    else if (roll < 0.88 && base > 0.1) ent('cop', l, y, { col: '#F2F4F8' });
+    else ent('pothole', l, y);
   }
-  ent('car', ri(0, 2), y, { col: pick(CARCOLS) });
-  return 0;
+  // reward rides the safe path: a few sticks leading INTO the gap, in the open lane
+  for (let i = 0; i < 3; i++) ent('stick', open, y - 250 + i * 52);
+  run.lastOpen = open;
+  run.restDebt = 1 + (blockTwo ? 1 : 0); // no back-to-back walls; harder walls buy more rest
+  return lerp(340, 190, D) + (blockTwo ? 120 : 0);
 }
 
 // ---------- juice ----------
@@ -2083,7 +2126,8 @@ function updatePlay(dt) {
   }
 
   // lane movement (settle-gated, one lane at a time)
-  tryLaneMove();
+  panRatchet(); // touch: continuous-pan ratchet
+  tryLaneMove(); // keyboard: queued discrete swipes
   const tx = laneX(player.tlane);
   player.x += (tx - player.x) * Math.min(1, dt * 13);
   player.tilt = clamp((tx - player.x) / LANEW, -1, 1);
@@ -2102,8 +2146,7 @@ function updatePlay(dt) {
     const remAtY = run.distM - y / M2PX;
     if (remAtY < 55) { run.nextSpawn += 240; continue; }
     if (run.turns.some(t => t.state === 'pending' && Math.abs(t.m * M2PX - y) < 320)) { run.nextSpawn += 180; continue; }
-    const extra = spawnPattern(y);
-    run.nextSpawn += lerp(345, 220, diff()) + rnd(0, 70) + extra;
+    run.nextSpawn += spawnPattern(y) + rnd(0, 60); // director returns the full gap to the next beat
   }
 
   // entities
@@ -2861,6 +2904,9 @@ function frame(ts) {
     updateFx(dt);
     if (state === 'title' || state === 'order' || state === 'shop') tTitle += dt;
   }
+  // scooter engine: alive only while actually riding; idles to silence everywhere else
+  const riding = state === 'play' && run && !run.over && !run.crashing;
+  engine.update(riding ? run.speed / run.baseSpeed : 0, riding && isBoost(), riding);
   renderScene(tGlobal);
   ctx.setTransform(scale * dpr, 0, 0, scale * dpr, 0, 0);
   ctx.clearRect(0, 0, W, H);
@@ -2912,6 +2958,7 @@ window.__T = {
   get player() { return player; },
   get entities() { return entities; },
   get S() { return S; },
+  engineState: () => eng ? { f: eng.o1.frequency.value, gain: eng.g.gain.value, lp: eng.lp.frequency.value } : null,
   resize,
 };
 </script>

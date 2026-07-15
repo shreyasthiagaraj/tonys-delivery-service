@@ -83,9 +83,9 @@ const L_LAMP = [1.0, 0.78, 0.42], L_FIRE = [1.0, 0.40, 0.09];
 // two levels per mood, then it rolls over: day -> sunset -> night
 const todIdx = lvl => Math.floor((Math.max(1, lvl) - 1) / 2) % 3;
 const TIMES = [ // day / sunset / night
-  { sky: '#CBDAE4', fogN: 38, fogF: 82, amb: [0.34, 0.38, 0.45], light: [1.02, 0.97, 0.87], sun: [0.551, 0.702, -0.451], pt: 0.45, lamp: false, wet: 0 },
-  { sky: '#E9B896', fogN: 36, fogF: 78, amb: [0.30, 0.26, 0.30], light: [1.20, 0.78, 0.48], sun: [0.72, 0.36, -0.59], pt: 0.62, lamp: true, wet: 0.45 },
-  { sky: '#1E2749', fogN: 34, fogF: 74, amb: [0.08, 0.10, 0.18], light: [0.20, 0.24, 0.42], sun: [0.40, 0.80, -0.44], pt: 1.05, lamp: true, wet: 0.9 },
+  { sky: '#CBDAE4', fogN: 38, fogF: 82, amb: [0.34, 0.38, 0.45], light: [1.02, 0.97, 0.87], sun: [0.551, 0.702, -0.451], pt: 0.45, lamp: false, wet: 0, hero: 0.10 },
+  { sky: '#E9B896', fogN: 36, fogF: 78, amb: [0.30, 0.26, 0.30], light: [1.20, 0.78, 0.48], sun: [0.72, 0.36, -0.59], pt: 0.62, lamp: true, wet: 0.45, hero: 0.55 },
+  { sky: '#1E2749', fogN: 34, fogF: 74, amb: [0.08, 0.10, 0.18], light: [0.20, 0.24, 0.42], sun: [0.40, 0.80, -0.44], pt: 1.05, lamp: true, wet: 0.9, hero: 1.15 },
 ];
 
 // ---------- save ----------
@@ -323,7 +323,7 @@ function initGL() {
     'lit+=uLightCol*sp*pow(max(dot(n,Hv),0.0),gloss)*step(0.0001,d)*sh;' +
     // a wet surface also mirrors the sky, strongest at grazing angles
     'float fres=pow(1.0-clamp(dot(n,V),0.0,1.0),4.0);' +
-    'lit+=uFogCol*wet*fres*0.55;' +
+    'lit+=uFogCol*wet*fres*0.28;' +
     // POINT LIGHTS. Every breadstick, taillight, lamp and blinker is a real light that
     // spills onto the road and the geometry around it. Before, they were additive
     // billboards pasted over the frame — light ON the screen, not light IN the world.
@@ -1254,12 +1254,17 @@ function renderWorld(o) {
   // edges and read like a phone camera; a ~30deg lens from 48u keeps edges near-parallel
   // and gives the diorama-under-glass look the reference has.
   const pw = pp0.x;
-  const fovTarget = 36 + (o.boost ? 3 : 0) + cine * 5; // lens punches out on a near miss
+  const fovTarget = 34 + (o.boost ? 3 : 0) + cine * 5; // lens punches out on a near miss
   fovCur = lerp(fovCur, fovTarget, cine > 0.05 ? 0.28 : 0.1);
   const jx = shake > 0 ? rnd(-shake, shake) / 90 : 0;
   const jy = shake > 0 ? rnd(-shake, shake) / 110 : 0;
-  const eye = [pw * 0.16 + jx, 40 + jy, 12];
-  const cen = [pw * 0.22 + jx, 0, -12];
+  // Camera is FIXED over the road centre — it does NOT track the player's lane. Following
+  // the player's x panned the whole world sideways on every lane change, which is nauseating;
+  // now the frame holds still and only the scooter slides between lanes.
+  // Lowered and pulled back from the old straight-down rig so you see a bit behind the
+  // rider (a slight chase angle), and closer so the scooter reads larger on screen.
+  const eye = [jx, 30 + jy, 16.5];
+  const cen = [jx, 0, -7.5];
   glowTilt = -Math.atan2(eye[1] - cen[1], eye[2] - cen[2]); // billboards face THIS camera
   const up = [Math.sin(-worldRot * 0.3), 1, 0];
   const proj = mPersp(fovCur * Math.PI / 180, glc.width / Math.max(1, glc.height), 6, 190);
@@ -1380,13 +1385,15 @@ function renderWorld(o) {
     if (!shadowsOK) drawModel(o.player.arriving ? MOD.walkShadow : MOD.shadow, pp0.x + 0.05, 0.035, pp0.z + 0.05 - (cr ? cr.dz : 0), { s: [1.0, 1, 1.9], ry: pp0.yaw, noCast: true });
     if (!blinkOff) {
       if (cr) {
-        drawModel(scooterModel(o.player.skin), pp0.x, cr.y, pp0.z - cr.dz, { rx: cr.rx, ry: cr.ry, rz: cr.rz, s: 0.92 });
+        drawModel(scooterModel(o.player.skin), pp0.x, cr.y, pp0.z - cr.dz, { rx: cr.rx, ry: cr.ry, rz: cr.rz, s: 1.24, spec: 0.3 });
       } else {
+        // hero reads bigger on screen now — the scooter was too small to see clearly
         drawModel(scooterModel(o.player.skin), pp0.x, Math.sin(t * 16) * 0.02 + (o.player.stumble ? Math.sin(t * 44) * 0.05 : 0), pp0.z, {
           rz: -o.player.tilt * 0.38,
           ry: -o.player.tilt * 0.16 + pp0.yaw,
           rx: o.boost ? 0.035 : 0,
-          s: 1.02,
+          s: 1.38,
+          spec: 0.3,
         });
       }
     }
@@ -1480,6 +1487,11 @@ function renderWorld(o) {
       const cf = Math.max(0, 1 - o.player.crash.rx / 5);
       addLight(pp0.x, 0.9, pp0.z - o.player.crash.dz, 9, L_FIRE, 4.0 * cf);
     }
+  }
+  // hero key: a soft warm light that follows the rider so the scooter always reads, even
+  // at night when there is almost no ambient. It sits at the player, so it always wins a slot.
+  if (o.player && !o.player.crash && tod.hero > 0) {
+    addLight(pp0.x, 3.0, pp0.z + 0.4, 4.2, [1.0, 0.95, 0.86], tod.hero);
   }
   uploadLights(pp0.x, pp0.z);
 
@@ -1700,13 +1712,13 @@ function pointerDown(x, y) {
   if (state === 'play') boostTouch = true;
 }
 function pointerMove(x, y) {
-  if (!ptr.down) return;
+  if (!ptr.down || ptr.swiped) return; // ONE lane per gesture: fire once, then wait for lift
   const dx = x - ptr.x0, dy = y - ptr.y0;
-  // one lane per swipe notch: bigger threshold, and each notch re-anchors so a long
-  // pan still only requests one lane at a time (the settle gate spaces them out)
-  if (Math.abs(dx) > 48 && Math.abs(dx) > Math.abs(dy) * 1.15) {
+  // A whole pan gesture — however long — moves exactly one lane. To move another the player
+  // must release and swipe again. No re-anchoring, no lane-by-lane crawl on a held pan.
+  if (Math.abs(dx) > 40 && Math.abs(dx) > Math.abs(dy) * 1.15) {
     onSwipe(dx > 0 ? 1 : -1);
-    ptr.x0 = x; ptr.y0 = y; ptr.swiped = true;
+    ptr.swiped = true;
   }
 }
 function pointerUp(x, y) {
